@@ -28,9 +28,9 @@ from planner_agent.schemas.artifacts import Artifact
 from planner_agent.services._json import to_jsonable
 from planner_agent.services.artifact_service import ArtifactService
 
-MAX_INLINE_TOOL_RESULT_CHARS = 60_000
-TOOL_RESULT_PREVIEW_CHARS = 2_000
-TOOL_TRACE_PREVIEW_CHARS = 4_000
+MAX_INLINE_TOOL_RESULT_CHARS = 10_000
+TOOL_RESULT_PREVIEW_CHARS = 1_200
+TOOL_TRACE_PREVIEW_CHARS = 2_000
 TOOL_RESULT_SUMMARY_CHARS = 500
 
 

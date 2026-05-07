@@ -80,7 +80,7 @@ MAX_PREVIEW_ROWS_CURRENT: int = 100
 #: Максимальное число строк при предпросмотре источника данных
 MAX_PREVIEW_ROWS_SOURCE: int = 200
 
-MAX_TEXT_READ_CHARS: int = 20_000
+MAX_TEXT_READ_CHARS: int = 8_000
 
 DEFAULT_WORKSPACE_TOOL_NAMES: frozenset[str] = frozenset(
     {

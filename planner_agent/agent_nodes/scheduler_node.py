@@ -27,8 +27,16 @@ WAITING_STATUSES = {TaskStatus.RUNNING, TaskStatus.NEEDS_VALIDATION}
 # Сообщения об ошибках и состояниях
 MSG_EMPTY_PLAN = "Planner returned an empty plan."
 MSG_NO_EXECUTABLE_TASKS = "No executable tasks remain."
-MAX_ARTIFACTS_IN_WORKER_CONTEXT = 20
-MAX_DEPENDENCY_RESULT_CHARS = 12_000
+MAX_ARTIFACTS_IN_WORKER_CONTEXT = 12
+MAX_DEPENDENCY_RESULT_CHARS = 3_000
+MAX_DEPENDENCY_ERROR_CHARS = 2_000
+MAX_DEPENDENCY_VALIDATION_CHARS = 1_000
+MAX_ARTIFACT_SUMMARY_CHARS = 500
+EXCLUDED_WORKER_CONTEXT_ARTIFACT_ROLES = {
+    "prompt_trace",
+    "prompt_payload",
+    "tool_call_trace",
+}
 
 
 def _collect_ancestor_data(
@@ -68,7 +76,9 @@ def _collect_ancestor_data(
 
     result_text = node.full_result or node.result_preview
     if result_text:
-        previews.append(f"Task {task_id} result: {result_text}")
+        previews.append(
+            f"Task {task_id} result: {result_text[:MAX_DEPENDENCY_RESULT_CHARS]}"
+        )
 
     for parent_id in node.dependencies:
         parent_vars, parent_previews = _collect_ancestor_data(plan, parent_id, visited)
@@ -180,8 +190,14 @@ def _build_dependency_context(
                 "evidence_refs": dependency.evidence_refs,
                 "result_preview": result_text[:MAX_DEPENDENCY_RESULT_CHARS],
                 "validation_passed": dependency.validation_passed,
-                "validation_reason": dependency.validation_reason,
-                "error_log": dependency.error_log,
+                "validation_reason": _limit_text(
+                    dependency.validation_reason,
+                    max_chars=MAX_DEPENDENCY_VALIDATION_CHARS,
+                ),
+                "error_log": _limit_text(
+                    dependency.error_log,
+                    max_chars=MAX_DEPENDENCY_ERROR_CHARS,
+                ),
             }
         )
 
@@ -313,7 +329,7 @@ async def scheduler_node(
         payload = WorkerPayload(
             task=task,
             context_schemas=task_context_schemas,
-            previous_results="\n".join(all_results) if all_results else "",
+            previous_results="",
             resolved_inputs=dependency_context.get("resolved_inputs", {}),
             dependency_context=dependency_context,
             filesystem_context=state.filesystem_context,
@@ -467,6 +483,9 @@ def _select_artifact_ids(state: AgentState, task: Task) -> list[str]:
 
     def add_many(ids: list[str]) -> None:
         for artifact_id in ids:
+            payload = (state.artifact_index or {}).get(artifact_id)
+            if _is_excluded_worker_context_artifact(payload):
+                continue
             if artifact_id and artifact_id not in ordered:
                 ordered.append(artifact_id)
 
@@ -483,6 +502,25 @@ def _select_artifact_ids(state: AgentState, task: Task) -> list[str]:
     return ordered
 
 
+def _is_excluded_worker_context_artifact(payload: Any) -> bool:
+    """Проверяет, нужно ли скрыть служебный artifact из prompt worker-а.
+
+    Args:
+        payload: JSON-совместимое описание artifact из ``state.artifact_index``.
+
+    Returns:
+        ``True``, если artifact является служебным trace/payload и его не нужно
+        автоматически добавлять в контекст worker-а.
+    """
+
+    if not isinstance(payload, dict):
+        return False
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    return str(metadata.get("artifact_role") or "") in EXCLUDED_WORKER_CONTEXT_ARTIFACT_ROLES
+
+
 def _compact_artifact_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Обрезает payload artifact до безопасной карточки для worker prompt.
 
@@ -496,12 +534,13 @@ def _compact_artifact_payload(payload: dict[str, Any]) -> dict[str, Any]:
     metadata = payload.get("metadata")
     if not isinstance(metadata, dict):
         metadata = {}
+    summary = str(payload.get("summary") or "")
     return {
         "artifact_id": payload.get("artifact_id"),
         "kind": payload.get("kind"),
         "uri": payload.get("uri"),
         "mime_type": payload.get("mime_type"),
-        "summary": payload.get("summary"),
+        "summary": _limit_text(summary, max_chars=MAX_ARTIFACT_SUMMARY_CHARS),
         "checksum": payload.get("checksum"),
         "metadata": {
             key: metadata[key]
@@ -519,6 +558,26 @@ def _compact_artifact_payload(payload: dict[str, Any]) -> dict[str, Any]:
             if key in metadata
         },
     }
+
+
+def _limit_text(value: str | None, *, max_chars: int) -> str | None:
+    """Обрезает текстовое значение для передачи в prompt worker-а.
+
+    Args:
+        value: Исходный текст или ``None``.
+        max_chars: Максимальное количество символов, которое можно оставить.
+
+    Returns:
+        Исходный текст в пределах лимита, помеченный как обрезанный при
+        превышении бюджета, или ``None`` для пустого значения.
+    """
+
+    if value is None:
+        return None
+    text = str(value)
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}...[truncated]"
 
 
 def _resolve_worker_parent_ids(

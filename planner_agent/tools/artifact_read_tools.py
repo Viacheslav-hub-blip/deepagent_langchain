@@ -39,10 +39,10 @@ from pydantic import BaseModel, Field
 from planner_agent.schemas.artifacts import Artifact
 from planner_agent.services.artifact_service import ArtifactService
 
-DEFAULT_PREVIEW_CHARS = 4_000
-DEFAULT_CHUNK_CHARS = 20_000
-MAX_CHUNK_CHARS = 60_000
-MAX_LIST_ITEMS = 100
+DEFAULT_PREVIEW_CHARS = 2_000
+DEFAULT_CHUNK_CHARS = 8_000
+MAX_CHUNK_CHARS = 20_000
+MAX_LIST_ITEMS = 50
 MAX_PROFILE_COLUMNS = 200
 MAX_PROFILE_TOP_VALUES = 20
 MAX_SAMPLE_RECORDS = 100
@@ -91,7 +91,7 @@ class ArtifactReadChunkInput(BaseModel):
     )
     limit: int = Field(
         default=DEFAULT_CHUNK_CHARS,
-        description="Количество символов для чтения, максимум 60000.",
+        description="Количество символов для чтения, максимум 20000.",
     )
 
 
@@ -369,7 +369,7 @@ def build_artifact_read_tools(
             name="artifact_read_chunk",
             description=(
                 "Read a bounded text slice from an artifact by offset and limit "
-                "(max 60000 chars). Use for deterministic pagination over long "
+                "(max 20000 chars). Use for deterministic pagination over long "
                 "reports, JSON exports, logs and traces while keeping LLM context "
                 "size under control."
             ),

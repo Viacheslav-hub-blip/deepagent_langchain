@@ -43,13 +43,16 @@ DEFAULT_TASK_ID: str = "unknown_task"
 CRITIC_NODE_NAME: str = "critic"
 
 # Максимальная длина превью результата (символов)
-RESULT_PREVIEW_MAX_LEN: int = 4_000
+RESULT_PREVIEW_MAX_LEN: int = 3_000
+
+# Максимальная длина полного ответа worker-а, сохраняемого в plan для следующих узлов.
+FULL_RESULT_STATE_MAX_LEN: int = 8_000
 
 # Максимальная длина вывода в лог воркера (символов)
 WORKER_LOG_MAX_LEN: int = 4_000
 
 # Максимальная длина краткого описания artifact в индексе
-ARTIFACT_SUMMARY_MAX_LEN: int = 1000
+ARTIFACT_SUMMARY_MAX_LEN: int = 500
 
 # Максимальное количество внутренних шагов ReAct worker-а.
 REACT_AGENT_RECURSION_LIMIT: int = 18
@@ -59,6 +62,31 @@ CONSOLE_BLOCK_MAX_LENGTH: int = 10_000
 
 # Максимальное число skills, автоматически загружаемых worker-ом из previews.
 MAX_AUTO_LOADED_SKILLS: int = 5
+
+# Максимальная длина preview одного skill в prompt worker-а.
+SKILL_PREVIEW_MAX_LEN: int = 800
+
+# Максимальная длина полного текста одного skill в prompt worker-а.
+LOADED_SKILL_MAX_LEN: int = 8_000
+
+# Максимальное число пакетов sandbox, показываемых worker-у.
+MAX_INSTALLED_PACKAGES_IN_PROMPT: int = 60
+
+# Приоритетные библиотеки, которые важнее показать при сжатии списка пакетов.
+PREFERRED_INSTALLED_PACKAGES: tuple[str, ...] = (
+    "pandas",
+    "numpy",
+    "scipy",
+    "scikit-learn",
+    "sklearn",
+    "matplotlib",
+    "seaborn",
+    "plotly",
+    "pyarrow",
+    "openpyxl",
+    "sqlalchemy",
+    "requests",
+)
 
 logger = logging.getLogger(__name__)
 
@@ -227,11 +255,32 @@ def _format_installed_packages(packages: dict[str, str]) -> str:
         "Используй их при генерации Python-кода (generate_python_code).",
         "",
     ]
-    for name in sorted(packages.keys()):
+    package_names = _select_installed_package_names(packages)
+    for name in package_names:
         version = packages[name]
         lines.append(f"  - {name}=={version}")
+    hidden_count = max(0, len(packages) - len(package_names))
+    if hidden_count:
+        lines.append(f"  - ... еще {hidden_count} пакетов скрыто для экономии контекста")
     lines.append("</available_python_packages>")
     return "\n".join(lines)
+
+
+def _select_installed_package_names(packages: dict[str, str]) -> list[str]:
+    """Выбирает компактный список установленных пакетов для prompt worker-а.
+
+    Args:
+        packages: Словарь ``{имя_пакета: версия}`` из sandbox.
+
+    Returns:
+        Список имен пакетов: сначала приоритетные аналитические библиотеки,
+        затем остальные по алфавиту в пределах бюджета prompt.
+    """
+
+    available = set(packages)
+    preferred = [name for name in PREFERRED_INSTALLED_PACKAGES if name in available]
+    remaining = [name for name in sorted(available) if name not in preferred]
+    return [*preferred, *remaining][:MAX_INSTALLED_PACKAGES_IN_PROMPT]
 
 
 async def _create_worker_system_prompt(
@@ -424,7 +473,11 @@ def _format_skill_previews(skill_previews: dict[str, str]) -> str:
         "Если skill подходит к задаче, загрузи полный текст через tool skill_view.",
     ]
     for skill_name, preview in skill_previews.items():
-        lines.append(f"- {skill_name}: {preview}")
+        preview_text = _limit_text(
+            str(preview),
+            max_chars=SKILL_PREVIEW_MAX_LEN,
+        )
+        lines.append(f"- {skill_name}: {preview_text}")
     lines.append("</available_skill_previews>")
     return "\n".join(lines)
 
@@ -481,7 +534,8 @@ def _format_loaded_skills(loaded_skills: dict[str, str]) -> str:
 
     blocks = ["<loaded_skills>"]
     for skill_name, content in loaded_skills.items():
-        blocks.append(f"<skill name=\"{skill_name}\">\n{content.strip()}\n</skill>")
+        limited_content = _limit_text(content.strip(), max_chars=LOADED_SKILL_MAX_LEN)
+        blocks.append(f"<skill name=\"{skill_name}\">\n{limited_content}\n</skill>")
     blocks.append("</loaded_skills>")
     return "\n".join(blocks)
 
@@ -502,7 +556,7 @@ async def _apply_tool_output(task: Task, raw_output: str) -> bool:
         parsed = json.loads(raw_output)
     except Exception:
         # Не JSON — сохраняем как есть
-        task.result_preview = raw_output
+        task.result_preview = _limit_text(raw_output, max_chars=RESULT_PREVIEW_MAX_LEN)
         task.error_log = None
         return True
 
@@ -527,9 +581,25 @@ async def _apply_tool_output(task: Task, raw_output: str) -> bool:
         return False
 
     # JSON, но без флага success — сохраняем строковое представление
-    task.result_preview = str(parsed)
+    task.result_preview = _limit_text(str(parsed), max_chars=RESULT_PREVIEW_MAX_LEN)
     task.error_log = None
     return True
+
+
+def _limit_text(text: str, *, max_chars: int) -> str:
+    """Обрезает текст для хранения в состоянии или prompt.
+
+    Args:
+        text: Исходный текст.
+        max_chars: Максимальное количество символов.
+
+    Returns:
+        Текст в пределах лимита с явной пометкой об обрезании.
+    """
+
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}...[truncated]"
 
 
 def _get_last_message(messages: list[Any], message_type: type) -> Any | None:
@@ -804,6 +874,7 @@ async def worker_node(
         artifact_index=artifact_index,
         tool_traces=tool_traces,
     )
+    _shrink_task_for_state(task)
 
     update_payload: dict[str, Any] = {
         "plan": {task_id: task},
@@ -834,6 +905,31 @@ async def worker_node(
             )
         ],
     )
+
+
+def _shrink_task_for_state(task: Task) -> None:
+    """Сжимает тяжелые поля задачи перед сохранением в runtime state.
+
+    Args:
+        task: Задача worker-а, которую нужно сохранить в план.
+
+    Returns:
+        ``None``. Функция изменяет поля задачи на месте, оставляя полные данные
+        доступными через artifacts, записанные до сжатия.
+    """
+
+    if task.full_result:
+        task.full_result = _limit_text(
+            task.full_result,
+            max_chars=FULL_RESULT_STATE_MAX_LEN,
+        )
+    if task.result_preview:
+        task.result_preview = _limit_text(
+            task.result_preview,
+            max_chars=RESULT_PREVIEW_MAX_LEN,
+        )
+    if task.error_log:
+        task.error_log = _limit_text(task.error_log, max_chars=WORKER_LOG_MAX_LEN)
 
 
 def _with_artifact_read_tools(
