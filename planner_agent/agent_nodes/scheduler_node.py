@@ -586,6 +586,8 @@ def _select_artifact_ids(state: AgentState, task: Task) -> list[str]:
                 continue
             if _is_excluded_worker_context_artifact(payload):
                 continue
+            if not _is_dataframe_worker_artifact(payload):
+                continue
             if artifact_id and artifact_id not in ordered:
                 ordered.append(artifact_id)
 
@@ -621,6 +623,21 @@ def _is_excluded_worker_context_artifact(payload: Any) -> bool:
     if not isinstance(metadata, dict):
         return False
     return str(metadata.get("artifact_role") or "") in EXCLUDED_WORKER_CONTEXT_ARTIFACT_ROLES
+
+
+def _is_dataframe_worker_artifact(payload: dict[str, Any]) -> bool:
+    """Оставляет в worker context только DataFrame artifacts загрузочных tools."""
+
+    if str(payload.get("kind") or "") != "dataset":
+        return False
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    variable_name = str(
+        metadata.get("variable_name") or metadata.get("sandbox_variable_name") or ""
+    ).strip()
+    columns = metadata.get("columns")
+    return bool(variable_name and isinstance(columns, list) and len(columns) > 0)
 
 
 def _compact_artifact_payload(payload: dict[str, Any]) -> dict[str, Any]:

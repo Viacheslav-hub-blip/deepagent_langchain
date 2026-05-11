@@ -68,6 +68,9 @@ class SchedulerLineageTests(unittest.TestCase):
                 "tool_name": "export_transactions",
                 "reusable": True,
                 "editable": True,
+                "variable_name": "df_transactions",
+                "columns": ["event_id", "amount"],
+                "column_types": {"event_id": "str", "amount": "float"},
                 "large_internal_field": "should not be copied",
             },
         }
@@ -81,8 +84,8 @@ class SchedulerLineageTests(unittest.TestCase):
 
         self.assertEqual(context["artifact_count"], 1)
         artifact = context["artifacts"]["artifact-1"]
-        self.assertEqual(artifact["artifact_name"], "artifact-1")
-        self.assertEqual(artifact["schema"], "")
+        self.assertEqual(artifact["artifact_name"], "df_transactions")
+        self.assertEqual(artifact["schema"], "event_id:str, amount:float")
         self.assertEqual(context["selected_artifact_ids"], ["artifact-1"])
         self.assertEqual(context["hidden_artifact_count"], 0)
 
@@ -92,7 +95,11 @@ class SchedulerLineageTests(unittest.TestCase):
                 "df1": {
                     "artifact_id": "df1",
                     "kind": "dataset",
-                    "metadata": {"columns": ["a"], "column_types": {"a": "int"}},
+                    "metadata": {
+                        "variable_name": "df1",
+                        "columns": ["a"],
+                        "column_types": {"a": "int"},
+                    },
                 },
                 "tr1": {
                     "artifact_id": "tr1",
@@ -127,6 +134,9 @@ class SchedulerLineageTests(unittest.TestCase):
                 "editable": True,
                 "capture_reason": "context_budget_exceeded",
                 "original_size_estimate": 120000,
+                "variable_name": "df_events",
+                "columns": ["event_id", "event_dt"],
+                "column_types": {"event_id": "str", "event_dt": "datetime"},
                 "large_internal_field": "should not be copied",
             },
         }
@@ -163,8 +173,8 @@ class SchedulerLineageTests(unittest.TestCase):
             ["artifact-events"],
         )
         artifact = artifact_context["artifacts"]["artifact-events"]
-        self.assertEqual(artifact["artifact_name"], "artifact-events")
-        self.assertEqual(artifact["schema"], "")
+        self.assertEqual(artifact["artifact_name"], "df_events")
+        self.assertEqual(artifact["schema"], "event_id:str, event_dt:datetime")
 
     def test_scheduler_passes_transitive_dependency_results_to_worker(self) -> None:
         """Проверяет сквозную передачу результатов по цепочке зависимостей."""
@@ -199,13 +209,23 @@ class SchedulerLineageTests(unittest.TestCase):
                     "artifact_id": "artifact-trigger",
                     "kind": "dataset",
                     "uri": "C:/workspace/trigger.json",
-                    "metadata": {"task_id": "1"},
+                    "metadata": {
+                        "task_id": "1",
+                        "variable_name": "df_trigger",
+                        "columns": ["event_id", "amount"],
+                        "column_types": {"event_id": "str", "amount": "float"},
+                    },
                 },
                 "artifact-transactions": {
                     "artifact_id": "artifact-transactions",
                     "kind": "dataset",
                     "uri": "C:/workspace/transactions.json",
-                    "metadata": {"task_id": "2"},
+                    "metadata": {
+                        "task_id": "2",
+                        "variable_name": "df_transactions",
+                        "columns": ["event_id", "event_dt"],
+                        "column_types": {"event_id": "str", "event_dt": "datetime"},
+                    },
                 },
             },
         )
