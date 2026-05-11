@@ -1,146 +1,202 @@
-"""Тесты Spark-like LangChain tools, читающих CSV из examples/data."""
+"""Тесты универсального Spark-like LangChain tool для чтения CSV из examples/data.
+
+Содержит:
+- FakeSparkToolsTests: набор проверок spark_query_table.
+"""
+
 from __future__ import annotations
 
 import asyncio
 import unittest
-from pathlib import Path
 
-from examples.fake_spark_tools import (
-    TriggerCasesByPeriodInput,
-    build_fake_spark_tools,
-    build_spark_source_to_sandbox_tool,
-)
-from sandbox.sandbox import ClientPythonSandbox
+import pandas as pd
+
+from examples.fake_spark_tools import SparkTableFilter, SparkTableQueryInput, build_fake_spark_tools
 
 
 class FakeSparkToolsTests(unittest.TestCase):
-    """Проверяет Spark-like инструменты."""
+    """Проверяет универсальный Spark-like инструмент.
 
-    def test_fake_spark_tools_have_basic_tools(self) -> None:
-        """Проверяет наличие базовых инструментов."""
-        tools = {t.name: t for t in build_fake_spark_tools(delay_seconds=0.0)}
-        self.assertEqual(
-            set(tools),
-            {
-                "spark_lookup_trigger_cases",
-                "spark_get_trigger_cases_by_period",
-                "spark_get_uko_events",
-                "spark_get_cards_events",
-            },
-        )
+    Args:
+        Отсутствуют.
 
-    def test_spark_source_to_sandbox_preview(self) -> None:
-        """Проверяет preview источника через spark_source_to_sandbox."""
-        sandbox = ClientPythonSandbox()
-        tools = {t.name: t for t in build_spark_source_to_sandbox_tool(sandbox, delay_seconds=0.0)}
+    Returns:
+        None.
+    """
 
+    def test_fake_spark_tools_have_single_query_tool(self) -> None:
+        """Проверяет, что фабрика возвращает только один универсальный инструмент.
+
+        Args:
+            Отсутствуют.
+
+        Returns:
+            None.
+        """
+
+        tools = {tool.name: tool for tool in build_fake_spark_tools(delay_seconds=0.0)}
+
+        self.assertEqual(set(tools), {"spark_query_table"})
+
+    def test_spark_query_table_selects_columns(self) -> None:
+        """Проверяет выбор конкретных полей из таблицы.
+
+        Args:
+            Отсутствуют.
+
+        Returns:
+            None.
+        """
+
+        tool = build_fake_spark_tools(delay_seconds=0.0)[0]
         result = asyncio.run(
-            tools["spark_source_to_sandbox"].ainvoke({
-                "source_name": "source_1",
-                "preview": True,
-            })
-        )
-
-        self.assertEqual(result["mode"], "preview")
-        self.assertEqual(result["source_name"], "source_1")
-        self.assertEqual(result["source_file"], "source_1.csv")
-        self.assertGreater(result["total_rows"], 0)
-        self.assertEqual(len(result["rows"]), 5)
-        self.assertIn("columns", result)
-
-    def test_spark_source_to_sandbox_load(self) -> None:
-        """Проверяет загрузку источника в песочницу через spark_source_to_sandbox."""
-        sandbox = ClientPythonSandbox()
-        tools = {t.name: t for t in build_spark_source_to_sandbox_tool(sandbox, delay_seconds=0.0)}
-
-        result = asyncio.run(
-            tools["spark_source_to_sandbox"].ainvoke({
-                "source_name": "source_1",
-                "load": True,
-                "variable_name": "my_data",
-            })
-        )
-
-        self.assertEqual(result["mode"], "load")
-        self.assertEqual(result["source_name"], "source_1")
-        self.assertEqual(result["variable_name"], "my_data")
-        self.assertGreater(result["rows_count"], 0)
-
-        # Проверяем, что переменная появилась в песочнице
-        var_previews = asyncio.run(sandbox.get_all_variable_previews())
-        self.assertIn("my_data", var_previews)
-
-    def test_spark_source_to_sandbox_all_sources(self) -> None:
-        """Проверяет загрузку всех трёх источников."""
-        sandbox = ClientPythonSandbox()
-        tools = {t.name: t for t in build_spark_source_to_sandbox_tool(sandbox, delay_seconds=0.0)}
-
-        for src in ["source_1", "source_2", "source_3"]:
-            result = asyncio.run(
-                tools["spark_source_to_sandbox"].ainvoke({
-                    "source_name": src,
-                    "load": True,
-                })
+            tool.ainvoke(
+                {
+                    "table_name": "hits",
+                    "select_columns": ["event_id", "epk_id"],
+                    "max_rows": 3,
+                }
             )
-            self.assertEqual(result["mode"], "load")
-
-        var_previews = asyncio.run(sandbox.get_all_variable_previews())
-        for src in ["source_1", "source_2", "source_3"]:
-            var_name = f"df_{src}"
-            self.assertIn(var_name, var_previews, f"Missing {var_name}")
-
-    def test_spark_source_to_sandbox_info_mode(self) -> None:
-        """Проверяет info-режим (без preview и load)."""
-        sandbox = ClientPythonSandbox()
-        tools = {t.name: t for t in build_spark_source_to_sandbox_tool(sandbox, delay_seconds=0.0)}
-
-        result = asyncio.run(
-            tools["spark_source_to_sandbox"].ainvoke({"source_name": "source_1"})
         )
 
-        self.assertEqual(result["mode"], "info")
-        self.assertGreater(result["total_rows"], 0)
+        self.assertIsInstance(result, pd.DataFrame)
+        self.assertEqual(list(result.columns), ["event_id", "epk_id"])
+        self.assertLessEqual(len(result), 3)
+        self.assertGreater(result.attrs["spark_matched_rows"], 0)
 
-    def test_spark_source_to_sandbox_invalid_source(self) -> None:
-        """Проверяет ошибку при неверном имени источника."""
-        sandbox = ClientPythonSandbox()
-        tools = {t.name: t for t in build_spark_source_to_sandbox_tool(sandbox, delay_seconds=0.0)}
+    def test_spark_query_table_applies_filters(self) -> None:
+        """Проверяет фильтрацию строк по переданным ограничениям.
 
-        with self.assertRaises(Exception):
-            asyncio.run(
-                tools["spark_source_to_sandbox"].ainvoke({"source_name": "source_999"})
+        Args:
+            Отсутствуют.
+
+        Returns:
+            None.
+        """
+
+        tool = build_fake_spark_tools(delay_seconds=0.0)[0]
+        result = asyncio.run(
+            tool.ainvoke(
+                {
+                    "table_name": "hits_extra_info",
+                    "select_columns": ["event_id", "epk_id"],
+                    "filters": [
+                        {
+                            "column": "epk_id",
+                            "operator": "eq",
+                            "value": "2099007770421986000001",
+                        }
+                    ],
+                    "max_rows": 10,
+                }
             )
+        )
 
-    def test_spark_get_trigger_cases_by_period_found(self) -> None:
-        """Проверяет поиск сработок клиента за период."""
-        tools = {t.name: t for t in build_fake_spark_tools(delay_seconds=0.0)}
+        self.assertIsInstance(result, pd.DataFrame)
+        self.assertGreater(len(result), 0)
+        for value in result["epk_id"]:
+            self.assertEqual(str(value), "2099007770421986000001")
+
+    def test_spark_query_table_returns_schema_for_missing_column(self) -> None:
+        """Проверяет возврат схемы таблицы при несуществующем поле.
+
+        Args:
+            Отсутствуют.
+
+        Returns:
+            None.
+        """
+
+        tool = build_fake_spark_tools(delay_seconds=0.0)[0]
         result = asyncio.run(
-            tools["spark_get_trigger_cases_by_period"].ainvoke({
-                "epk_id": "client-42",
-                "start_date": "2025-01-01",
-                "end_date": "2025-01-31",
-            })
+            tool.ainvoke(
+                {
+                    "table_name": "hits",
+                    "select_columns": ["missing_field"],
+                    "max_rows": 1,
+                }
+            )
         )
 
-        self.assertIn("found", result)
-        self.assertIn("records_count", result)
-        self.assertIn("records", result)
-        self.assertIn("epk_id", result)
-        self.assertEqual(result["epk_id"], "client-42")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "unknown_columns")
+        self.assertEqual(result["error"]["missing_columns"], ["missing_field"])
+        self.assertIn("schema", result)
+        self.assertGreater(result["schema"]["columns_count"], 0)
 
-    def test_spark_get_trigger_cases_by_period_schema(self) -> None:
-        """Проверяет, что TriggerCasesByPeriodInput требует все поля."""
-        schema = TriggerCasesByPeriodInput(
-            epk_id="client-42",
-            start_date="2025-01-01",
-            end_date="2025-01-31",
+    def test_spark_query_table_returns_available_tables_for_unknown_table(self) -> None:
+        """Проверяет ошибку и список таблиц при неизвестной таблице.
+
+        Args:
+            Отсутствуют.
+
+        Returns:
+            None.
+        """
+
+        tool = build_fake_spark_tools(delay_seconds=0.0)[0]
+        result = asyncio.run(tool.ainvoke({"table_name": "unknown_table"}))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "unknown_table")
+        self.assertIn("hits", result["error"]["available_tables"])
+
+    def test_spark_query_table_requires_explicit_columns(self) -> None:
+        """Проверяет запрет выгрузки всех колонок без явного списка.
+
+        Args:
+            Отсутствуют.
+
+        Returns:
+            None.
+        """
+
+        tool = build_fake_spark_tools(delay_seconds=0.0)[0]
+        result = asyncio.run(tool.ainvoke({"table_name": "hits", "select_columns": []}))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "select_columns_required")
+        self.assertIn("schema", result)
+
+    def test_spark_query_table_rejects_select_all_marker(self) -> None:
+        """Проверяет запрет маркеров выбора всех колонок.
+
+        Args:
+            Отсутствуют.
+
+        Returns:
+            None.
+        """
+
+        tool = build_fake_spark_tools(delay_seconds=0.0)[0]
+        result = asyncio.run(tool.ainvoke({"table_name": "hits", "select_columns": ["*"]}))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "select_all_forbidden")
+        self.assertIn("schema", result)
+
+    def test_spark_query_table_schema_models(self) -> None:
+        """Проверяет Pydantic-схемы универсального Spark-like инструмента.
+
+        Args:
+            Отсутствуют.
+
+        Returns:
+            None.
+        """
+
+        filter_item = SparkTableFilter(column="epk_id", operator="eq", value="2099007770421986000001")
+        schema = SparkTableQueryInput(
+            table_name="hits",
+            select_columns=["event_id"],
+            filters=[filter_item],
+            max_rows=5,
         )
-        self.assertEqual(schema.epk_id, "client-42")
-        self.assertEqual(schema.start_date, "2025-01-01")
-        self.assertEqual(schema.end_date, "2025-01-31")
 
+        self.assertEqual(schema.table_name, "hits")
+        self.assertEqual(schema.filters[0].column, "epk_id")
         with self.assertRaises(Exception):
-            TriggerCasesByPeriodInput(epk_id="client-42")
+            SparkTableFilter(column="epk_id", operator="between", values=["20250101"])
 
 
 if __name__ == "__main__":

@@ -34,3 +34,6 @@ examples/runs_mvp_e2e/
 
 # Frontend dependencies (optional local UI under ui/analyst_ui)
 ui/analyst_ui/node_modules/
+ui/analytics_agent_ui/node_modules/
+ui/analytics_agent_ui/.npm-cache/
+ui/analytics_agent_ui/vite-dev*.log

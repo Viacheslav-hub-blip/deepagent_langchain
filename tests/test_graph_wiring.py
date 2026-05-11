@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from planner_agent.graph import build_research_graph
+from planner_agent.factory import planner_agent
 
 
 class FakeSandbox:
@@ -21,7 +21,7 @@ class FakeSandbox:
 
 class GraphWiringTests(unittest.TestCase):
     def test_graph_compiles_without_host_sandbox_package_when_no_code_wrapper_needed(self) -> None:
-        graph = build_research_graph(
+        graph = planner_agent(
             model=object(),
             sandbox=FakeSandbox(),
             tools=[],

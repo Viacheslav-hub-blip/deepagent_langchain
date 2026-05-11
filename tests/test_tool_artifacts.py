@@ -5,6 +5,7 @@ import unittest
 from asyncio import run
 from pathlib import Path
 
+import pandas as pd
 from langchain_core.tools import tool
 
 from planner_agent.models import Task
@@ -12,7 +13,123 @@ from planner_agent.services.artifact_service import ArtifactService
 from planner_agent.tools.artifact_wrappers import wrap_tools_for_artifacts
 
 
+class FakeSandbox:
+    """Минимальная песочница для проверки добавления DataFrame-переменных.
+
+    Args:
+        Отсутствуют.
+
+    Returns:
+        Объект с API, нужным ArtifactToolWrapper.
+    """
+
+    def __init__(self) -> None:
+        """Создает пустое хранилище переменных.
+
+        Args:
+            Отсутствуют.
+
+        Returns:
+            None.
+        """
+
+        self.globals: dict = {}
+        self.last_dataframe_variable: str | None = None
+
+    async def add_variable(self, name: str, value: object) -> None:
+        """Добавляет переменную в тестовую песочницу.
+
+        Args:
+            name: Имя переменной.
+            value: Значение переменной.
+
+        Returns:
+            None.
+        """
+
+        self.globals[name] = value
+
+
 class ToolArtifactTests(unittest.TestCase):
+    def test_dataframe_result_is_captured_with_metadata_only_for_model(self) -> None:
+        """Проверяет, что DataFrame сохраняется в artifact, а модели возвращается только структура."""
+
+        @tool("load_client_events")
+        async def load_client_events(client_id: str) -> pd.DataFrame:
+            """Load client events as a DataFrame."""
+            return pd.DataFrame(
+                [
+                    {"client_id": client_id, "event_id": "evt-secret-1", "amount": 100.0},
+                    {"client_id": client_id, "event_id": None, "amount": 250.0},
+                ]
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifacts = ArtifactService(tmp)
+            task = Task(task_id="df-load", description="Load dataframe")
+            artifact_index: dict = {}
+            tool_traces: list[dict] = []
+            sandbox = FakeSandbox()
+
+            wrapped_tool = wrap_tools_for_artifacts(
+                tools=[load_client_events],
+                artifact_service=artifacts,
+                run_id="run-df",
+                node_id="node-df",
+                task=task,
+                artifact_index=artifact_index,
+                tool_traces=tool_traces,
+                sandbox=sandbox,
+            )[0]
+
+            result = run(wrapped_tool.ainvoke({"client_id": "client-1"}))
+
+            self.assertIsInstance(result, str)
+            self.assertIn("data_scope: dataframe_metadata_only", result)
+            self.assertIn("row_count: 2", result)
+            self.assertIn("columns:", result)
+            self.assertIn("column_types:", result)
+            self.assertIn("has_empty_values: true", result)
+            self.assertIn("variable_name: tdf_load_load_client_events_1", result)
+            self.assertNotIn("evt-secret-1", result)
+            self.assertIn("tdf_load_load_client_events_1", sandbox.globals)
+            self.assertIs(sandbox.globals["tdf_load_load_client_events_1"], sandbox.globals[sandbox.last_dataframe_variable])
+
+            stored = artifacts.list_artifacts("run-df")
+            captured_artifact = next(
+                artifact
+                for artifact in stored
+                if artifact.metadata.get("artifact_role") == "captured_tool_result"
+            )
+            self.assertEqual(captured_artifact.kind, "dataset")
+            self.assertEqual(captured_artifact.mime_type, "text/csv")
+            self.assertEqual(captured_artifact.metadata["row_count"], 2)
+            self.assertEqual(
+                captured_artifact.metadata["variable_name"],
+                "tdf_load_load_client_events_1",
+            )
+            self.assertEqual(
+                captured_artifact.metadata["columns"],
+                ["client_id", "event_id", "amount"],
+            )
+            self.assertTrue(captured_artifact.metadata["has_empty_values"])
+            self.assertTrue(
+                captured_artifact.metadata["has_empty_values_by_column"]["event_id"]
+            )
+            self.assertEqual(task.artifact_refs, [captured_artifact.artifact_id])
+
+            trace_artifact = next(
+                artifact
+                for artifact in stored
+                if artifact.metadata.get("artifact_role") == "tool_call_trace"
+            )
+            trace_content = Path(trace_artifact.uri).read_text(encoding="utf-8")
+            self.assertIn('"row_count": 2', trace_content)
+            self.assertNotIn("evt-secret-1", trace_content)
+
+            captured_content = Path(captured_artifact.uri).read_text(encoding="utf-8")
+            self.assertIn("evt-secret-1", captured_content)
+
     def test_tool_result_is_saved_as_reusable_artifact(self) -> None:
         @tool("download_transactions")
         async def download_transactions(depth_days: int, amount: float) -> str:
@@ -42,9 +159,11 @@ class ToolArtifactTests(unittest.TestCase):
             )
 
             self.assertEqual(result, "transactions depth=30 amount=1000.0")
-            self.assertEqual(len(task.artifact_refs), 1)
-            self.assertEqual(set(artifact_index), set(task.artifact_refs))
+            # Маленький скалярный результат остается inline и не попадает в
+            # task.artifact_refs (только большие/файловые артефакты значимы).
+            self.assertEqual(task.artifact_refs, [])
             self.assertEqual(len(tool_traces), 1)
+            self.assertEqual(len(artifact_index), 1)
 
             stored = artifacts.list_artifacts("run-1")
             self.assertEqual(len(stored), 1)
@@ -52,6 +171,8 @@ class ToolArtifactTests(unittest.TestCase):
             self.assertEqual(stored[0].node_id, "node-1")
             self.assertEqual(stored[0].metadata["tool_name"], "download_transactions")
             self.assertTrue(stored[0].metadata["reusable"])
+            # Tool-trace artifact получает человеко-читаемый id вида t{task}_{tool}_{seq}_trace.
+            self.assertEqual(stored[0].artifact_id, "tcase_1_download_transactions_1_trace")
 
             content = Path(stored[0].uri).read_text(encoding="utf-8")
             self.assertIn("Tool: download_transactions", content)
@@ -115,7 +236,12 @@ class ToolArtifactTests(unittest.TestCase):
             trace_content = Path(trace_artifact.uri).read_text(encoding="utf-8")
             self.assertIn("Captured: True", trace_content)
             self.assertLess(len(trace_content), 10_000)
-            self.assertEqual(set(task.artifact_refs), set(artifact_index))
+            # В task.artifact_refs попадает только большой захваченный результат,
+            # tool_trace остается доступен через state.artifact_index.
+            self.assertEqual(task.artifact_refs, [captured_artifact.artifact_id])
+            self.assertEqual(set(artifact_index), {captured_artifact.artifact_id, trace_artifact.artifact_id})
+            self.assertEqual(captured_artifact.artifact_id, "tlarge-text_export_long_notes_1")
+            self.assertEqual(trace_artifact.artifact_id, "tlarge-text_export_long_notes_1_trace")
 
     def test_large_list_result_is_captured_as_dataset_without_tool_contract(self) -> None:
         @tool("load_events")
@@ -209,8 +335,113 @@ class ToolArtifactTests(unittest.TestCase):
                 dataset_artifact.metadata["capture_reason"],
                 "inline_structured_result",
             )
-            self.assertIn(dataset_artifact.artifact_id, task.artifact_refs)
+            # Маленький inline-структурированный результат сохраняется как artifact
+            # для responder/UI, но в task.artifact_refs не дублируется (данные уже
+            # в контексте worker-а).
+            self.assertNotIn(dataset_artifact.artifact_id, task.artifact_refs)
             self.assertIn(dataset_artifact.artifact_id, artifact_index)
+            self.assertEqual(dataset_artifact.artifact_id, "tsmall-list_load_day_events_1")
+
+    def test_artifact_read_chunk_capture_is_not_added_to_task_refs(self) -> None:
+        """artifact_* мета-инструменты не должны загромождать task.artifact_refs."""
+
+        @tool("artifact_read_chunk")
+        async def artifact_read_chunk(artifact_id: str, offset: int = 0) -> dict:
+            """Read chunk of existing artifact."""
+            return {
+                "artifact": {"artifact_id": artifact_id, "kind": "dataset"},
+                "content": "X" * 12_000,
+                "offset": offset,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifacts = ArtifactService(tmp)
+            task = Task(task_id="3", description="Inspect previous artifact")
+            artifact_index: dict = {}
+            tool_traces: list[dict] = []
+
+            wrapped = wrap_tools_for_artifacts(
+                tools=[artifact_read_chunk],
+                artifact_service=artifacts,
+                run_id="run-meta",
+                node_id="node-meta",
+                task=task,
+                artifact_index=artifact_index,
+                tool_traces=tool_traces,
+            )[0]
+
+            run(wrapped.ainvoke({"artifact_id": "foo", "offset": 0}))
+
+            # Мета-инструменты artifact_* читают существующие данные и не должны
+            # порождать новые ссылки в task.artifact_refs.
+            self.assertEqual(task.artifact_refs, [])
+            # Однако сами artifact-записи (capture + trace) сохраняются для аудита.
+            self.assertEqual(len(artifact_index), 2)
+            self.assertIn("t3_artifact_read_chunk_1", artifact_index)
+            self.assertIn("t3_artifact_read_chunk_1_trace", artifact_index)
+
+    def test_artifact_labels_use_retry_count_suffix(self) -> None:
+        """При повторе задачи labels включают суффикс ``_r{n}`` для уникальности."""
+
+        @tool("spark_lookup")
+        async def spark_lookup(event_id: str) -> list[dict]:
+            """Lookup event."""
+            return [{"event_id": event_id, "amount": 100}]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifacts = ArtifactService(tmp)
+            task = Task(task_id="2", description="Retry test", retry_count=3)
+            artifact_index: dict = {}
+            tool_traces: list[dict] = []
+
+            wrapped = wrap_tools_for_artifacts(
+                tools=[spark_lookup],
+                artifact_service=artifacts,
+                run_id="run-retry",
+                node_id="node-retry",
+                task=task,
+                artifact_index=artifact_index,
+                tool_traces=tool_traces,
+            )[0]
+
+            run(wrapped.ainvoke({"event_id": "evt-1"}))
+            run(wrapped.ainvoke({"event_id": "evt-2"}))
+
+            self.assertIn("t2_r3_spark_lookup_1", artifact_index)
+            self.assertIn("t2_r3_spark_lookup_1_trace", artifact_index)
+            self.assertIn("t2_r3_spark_lookup_2", artifact_index)
+            self.assertIn("t2_r3_spark_lookup_2_trace", artifact_index)
+
+    def test_label_collision_gets_unique_suffix(self) -> None:
+        """Если запрошенный artifact_id уже занят, добавляется числовой суффикс."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifacts = ArtifactService(tmp)
+            first = artifacts.write_artifact(
+                run_id="run-collide",
+                node_id="node-1",
+                kind="model_output",
+                filename="tasks/1/result_v1.md",
+                content="first",
+                mime_type="text/markdown",
+                summary="first",
+                metadata={"task_id": "1", "artifact_role": "worker_result"},
+                artifact_id="t1_result",
+            )
+            second = artifacts.write_artifact(
+                run_id="run-collide",
+                node_id="node-1",
+                kind="model_output",
+                filename="tasks/1/result_v2.md",
+                content="second",
+                mime_type="text/markdown",
+                summary="second",
+                metadata={"task_id": "1", "artifact_role": "worker_result"},
+                artifact_id="t1_result",
+            )
+
+            self.assertEqual(first.artifact_id, "t1_result")
+            self.assertEqual(second.artifact_id, "t1_result_2")
 
     def test_direct_file_path_result_is_registered_as_editable_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -245,7 +476,10 @@ class ToolArtifactTests(unittest.TestCase):
             self.assertEqual(stored[0].uri, str(export_path.resolve()))
             self.assertTrue(stored[0].metadata["reusable"])
             self.assertTrue(stored[0].metadata["editable"])
-            self.assertEqual(set(task.artifact_refs), set(artifact_index))
+            # Существующий файл (existing_file_reference) считается значимым для task,
+            # tool_trace в task.artifact_refs не попадает.
+            self.assertEqual(task.artifact_refs, [stored[0].artifact_id])
+            self.assertEqual(set(artifact_index), {stored[0].artifact_id, stored[1].artifact_id})
 
 
 if __name__ == "__main__":

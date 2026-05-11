@@ -20,6 +20,8 @@
 - _format_responder_context_artifact: сбор markdown-копии стартового контекста responder.
 - _build_responder_react_tools: инструмент ``submit_final_report`` и artifact_* tools.
 - _normalize_final_markdown: нормализация итогового markdown с заголовком отчёта.
+- _format_responder_tool_calls_for_console: компактный вывод tool calls responder.
+- _extract_responder_tool_calls_from_messages: извлечение tool calls responder с preview результатов.
 - _format_fallback_message: fallback-отчет при ошибке генерации.
 - responder_node: LangGraph-узел финального отчёта (LangGraph ReAct + чтение artifacts).
 - _build_final_report_update: подготовка update для state.
@@ -33,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.prebuilt import create_react_agent
 from langgraph.types import Command
@@ -44,7 +46,7 @@ from ..schemas.artifacts import Artifact
 from ..schemas.lineage import StateNode
 from ..services.artifact_service import ArtifactService
 from ..services.lineage_service import LineageService
-from ..services.prompt_trace_service import write_prompt_trace
+from ..services.prompt_trace_service import write_prompt_trace, write_tool_calls_trace
 from ..tools.artifact_read_tools import build_artifact_read_tools
 
 
@@ -732,6 +734,54 @@ def _format_responder_tool_calls_for_console(react_messages: list[Any]) -> str:
     return "\n".join(lines)
 
 
+def _extract_responder_tool_calls_from_messages(
+        react_messages: list[Any],
+) -> list[dict[str, Any]]:
+    """Извлекает фактические вызовы responder tools из ReAct-сообщений.
+
+    Args:
+        react_messages: Список сообщений, возвращенных ``create_react_agent``.
+
+    Returns:
+        Список словарей с именем инструмента, аргументами, id вызова и preview
+        результата инструмента.
+    """
+
+    pending_meta: dict[str, dict[str, Any]] = {}
+    records: list[dict[str, Any]] = []
+    for msg in react_messages:
+        if isinstance(msg, AIMessage):
+            for raw_call in getattr(msg, "tool_calls", None) or []:
+                if not isinstance(raw_call, dict):
+                    continue
+                call_id = raw_call.get("id") or raw_call.get("tool_call_id")
+                if not call_id:
+                    continue
+                pending_meta[str(call_id)] = {
+                    "tool_name": raw_call.get("name"),
+                    "arguments": raw_call.get("args"),
+                }
+            continue
+
+        if isinstance(msg, ToolMessage):
+            call_id = getattr(msg, "tool_call_id", None)
+            call_key = str(call_id) if call_id is not None else ""
+            meta = pending_meta.pop(call_key, {}) if call_key else {}
+            records.append(
+                {
+                    "tool_call_id": call_id,
+                    "tool_name": getattr(msg, "name", None) or meta.get("tool_name"),
+                    "arguments": meta.get("arguments"),
+                    "tool_result_preview": _clip_section(
+                        str(msg.content),
+                        RESPONDER_MAX_CHARS_PER_TASK,
+                        "responder tool result truncated",
+                    ),
+                }
+            )
+    return records
+
+
 def _format_fallback_message(
         exc: Exception,
         completed_text: str,
@@ -857,6 +907,15 @@ async def responder_node(
             "RESPONDER TOOL CALLS",
             _format_responder_tool_calls_for_console(react_messages),
         )
+        tool_call_artifacts = write_tool_calls_trace(
+            artifact_service=artifact_service,
+            run_id=state.run_id,
+            node_id=state.current_node_id,
+            stage="responder",
+            tool_calls=_extract_responder_tool_calls_from_messages(react_messages),
+        )
+        if tool_call_artifacts:
+            prompt_trace_artifacts.update(tool_call_artifacts)
         final_md = _extract_final_markdown_from_react(react_messages, submitted_reports)
         return Command(
             update=_build_final_report_update(

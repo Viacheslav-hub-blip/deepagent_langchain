@@ -1,239 +1,145 @@
-"""Spark-like инструменты для чтения локальных CSV-источников из examples/data.
-
-Логические группы инструментов:
-┌─ Поиск сработок ───────────────────────────────────┐
-│  spark_lookup_trigger_cases   — поиск по event_id   │
-│                               или epk_id + date     │
-│  spark_get_trigger_cases_by_period — все сработки   │
-│                               клиента за период     │
-└────────────────────────────────────────────────────┘
-┌─ Выгрузка событий клиента ─────────────────────────┐
-│  spark_get_uko_events       — UKO-переводы         │
-│  spark_get_cards_events     — карточные операции   │
-└────────────────────────────────────────────────────┘
-┌─ Работа с CSV-источниками ─────────────────────────┐
-│  spark_source_to_sandbox    — preview / загрузка   │
-│                              в песочницу           │
-└────────────────────────────────────────────────────┘
+"""Spark-like инструмент для чтения локальных CSV-таблиц из examples/data.
 
 Содержит:
-- TriggerCaseInput: схема входа для spark_lookup_trigger_cases.
-- TriggerCasesByPeriodInput: схема входа для spark_get_trigger_cases_by_period.
-- ClientTransactionsInput: схема входа для выгрузки событий клиента.
-- build_fake_spark_tools: фабрика LangChain tools (сработки + события).
-- _spark_lookup_trigger_cases: получение сработок из таблицы hits.
-- _spark_get_trigger_cases_by_period: получение сработок клиента за период.
-- _spark_get_uko_events: выгрузка UKO-событий клиента.
-- _spark_get_cards_events: выгрузка карточных событий клиента.
-- _load_csv_table: загрузка CSV-таблицы с кешированием.
-- _load_hits_table: загрузка таблицы сработок.
-- _load_uko_table: загрузка таблицы uko_event с техническими полями связи.
-- _load_cards_table: загрузка таблицы cards_event с техническими полями связи.
-- _export_client_transactions: общая фильтрация операционных событий.
-- _filter_by_period: фильтрация таблицы по периоду.
-- _apply_optional_filters: применение дополнительных фильтров источника.
-- _normalize_event_dt: нормализация даты к формату YYYYMMDD.
-- _parse_event_dt: разбор даты из форматов YYYY-MM-DD и YYYYMMDD.
-- _to_records: преобразование DataFrame в JSON-совместимые записи.
+- SparkTableFilter: схема одного фильтра для spark_query_table.
+- SparkTableQueryInput: схема входа для spark_query_table.
+- build_fake_spark_tools: фабрика одного LangChain tool для запросов к Spark-like таблицам.
+- _spark_query_table: выполнение выборки по таблице, полям, фильтрам и лимиту.
+- _load_spark_table: загрузка таблицы по логическому имени.
+- _get_table_registry: создание реестра доступных Spark-like таблиц.
+- _get_table_schema: получение схемы таблицы.
+- _validate_select_columns_present: проверка, что агент явно указал нужные поля.
+- _validate_query_columns: проверка наличия полей в таблице.
+- _apply_filters: применение списка фильтров к DataFrame.
+- _apply_filter: применение одного фильтра к DataFrame.
+- _get_comparable_series: подготовка колонки к сравнению со значением фильтра.
+- _coerce_filter_value: приведение значения фильтра к типу колонки.
+- _clean_value: преобразование pandas/numpy значения к JSON-совместимому типу.
 - _fake_sleep: имитация задержки Spark-запроса.
 """
 
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
-
-
+from typing import Any, Literal
 
 import pandas as pd
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field, model_validator
 
-
 DATA_DIR = Path(__file__).resolve().parent / "data"
 HITS_FILE = "cspfs_repo_features3.hits_extra_info_129372427_view.csv"
 UKO_FILE = "csp_afpc_sss_inc.uko_event.csv"
 CARDS_FILE = "csp_afpc_sss_inc.cards_event.csv"
+HISTORY_AUTOMARKING_FILE = "csp_repo_features.history_automarking_big_148078_155487.csv"
+DEMO_TIMELINE_FILE = "demo_client_timeline.csv"
 SOURCE_1_FILE = "source_1.csv"
 SOURCE_2_FILE = "source_2.csv"
 SOURCE_3_FILE = "source_3.csv"
 
-TECHNICAL_COLUMNS = {
-    "_source_table",
-    "_source_file",
-    "_lookup_epk_id",
-    "_lookup_event_dt",
-    "_lookup_event_date",
-    "_linked_hit_event_id",
-    "_linked_hit_user_id",
-    "_linked_hit_event_time",
-}
-
-MERCHANT_COLUMNS = (
-    "atm_merchant_name",
-    "atm_merchant_name_tst",
-    "bnpl_merchant_mame",
-    "merchant_login",
-    "merchant_id",
-    "brand_name",
-    "legal_name_of_service_provider",
-    "full_name_org",
-    "recepient_ul_name",
-)
-MCC_COLUMNS = (
-    "atm_mcc",
-    "atm_mcc_name",
-    "atm_mcc_connection",
-    "atm_mcc_pprb_tst",
-    "mcc_group",
-    "mcc_list_inn",
-)
-RECIPIENT_COLUMNS = (
-    "transaction_beneficiar_account_number",
-    "transaction_beneficiar_nick_name",
-    "p2p_recipient_data",
-    "recipient_info",
-    "recipient_bank_name",
-    "payee_phone_number",
-    "payee_phone_number_in_foreign_bank",
-    "payee_user_id",
-    "payee_epk_id",
-    "recepient_fio",
-    "recepient_bik",
-    "recepient_inn",
-    "number_card_recepient",
-    "account_number_of_recipient",
-    "receiver_message",
-)
+FilterOperator = Literal[
+    "eq",
+    "ne",
+    "gt",
+    "gte",
+    "lt",
+    "lte",
+    "contains",
+    "in",
+    "between",
+    "is_null",
+    "not_null",
+]
 
 
-class TriggerCaseInput(BaseModel):
-    """Параметры получения сработки из таблицы hits.
+class SparkTableFilter(BaseModel):
+    """Описывает одно ограничение для выборки из Spark-like таблицы.
 
     Args:
-        event_id: Идентификатор конкретной сработки. Если задан, поиск идет по нему.
-        epk_id: Идентификатор клиента. Используется вместе с event_dt, когда нужно
-            получить все сработки клиента за день.
-        event_dt: Дата события в формате YYYY-MM-DD или YYYYMMDD для поиска по epk_id.
+        column: Имя поля, по которому нужно применить фильтр.
+        operator: Оператор фильтрации: eq, ne, gt, gte, lt, lte, contains, in,
+            between, is_null или not_null.
+        value: Значение для операторов eq, ne, gt, gte, lt, lte и contains.
+        values: Список значений для операторов in и between.
 
     Returns:
-        Валидированные параметры запроса с одним из двух режимов поиска.
+        Валидированное описание одного условия фильтрации.
     """
 
-    event_id: str | None = Field(
-        default=None,
-        description="Идентификатор конкретной сработки из таблицы hits.",
+    column: str = Field(description="Имя поля таблицы для фильтрации.")
+    operator: FilterOperator = Field(
+        default="eq",
+        description="Оператор фильтра: eq, ne, gt, gte, lt, lte, contains, in, between, is_null, not_null.",
     )
-    epk_id: str | None = Field(
+    value: Any | None = Field(
         default=None,
-        description="Идентификатор клиента для поиска всех сработок за день.",
+        description="Значение фильтра для операторов eq/ne/gt/gte/lt/lte/contains.",
     )
-    event_dt: str | None = Field(
+    values: list[Any] | None = Field(
         default=None,
-        description="Дата события в формате YYYY-MM-DD или YYYYMMDD.",
+        description="Список значений для операторов in и between.",
     )
 
     @model_validator(mode="after")
-    def validate_lookup_mode(self) -> "TriggerCaseInput":
-        """Проверяет, что указан event_id или пара epk_id и event_dt.
+    def validate_filter_values(self) -> "SparkTableFilter":
+        """Проверяет, что для выбранного оператора переданы нужные значения.
 
         Args:
             Отсутствуют.
 
         Returns:
-            Текущий объект схемы, если параметры заданы корректно.
+            Текущий объект фильтра, если параметры заданы корректно.
         """
 
-        if self.event_id:
+        if self.operator in {"is_null", "not_null"}:
             return self
-        if self.epk_id and self.event_dt:
+        if self.operator == "between":
+            if self.values is None or len(self.values) != 2:
+                raise ValueError("Для оператора between нужно передать ровно два значения в values.")
             return self
-        raise ValueError("Укажите event_id или пару epk_id + event_dt.")
+        if self.operator == "in":
+            if not self.values:
+                raise ValueError("Для оператора in нужно передать непустой список values.")
+            return self
+        if self.value is None:
+            raise ValueError(f"Для оператора {self.operator} нужно передать value.")
+        return self
 
 
-class ClientTransactionsInput(BaseModel):
-    """Параметры выгрузки событий клиента из операционной таблицы.
+class SparkTableQueryInput(BaseModel):
+    """Параметры универсальной выборки из Spark-like таблицы.
 
     Args:
-        epk_id: Идентификатор клиента из таблицы сработок.
-        event_dt: Опорная дата в формате YYYY-MM-DD или YYYYMMDD.
-        depth_days: Глубина периода назад от event_dt, если start_date/end_date не заданы.
-        start_date: Начальная дата периода в формате YYYY-MM-DD или YYYYMMDD.
-        end_date: Конечная дата периода в формате YYYY-MM-DD или YYYYMMDD.
-        min_amount: Минимальная сумма операции.
-        merchant_name: Фильтр по merchant/организации.
-        mcc_code: Фильтр по MCC-коду или MCC-описанию.
-        recipient: Фильтр по получателю.
-        event_type: Фильтр по типу события.
-        max_rows: Максимальное число строк после фильтрации.
+        table_name: Логическое имя таблицы из списка доступных таблиц.
+        select_columns: Минимально достаточный непустой список полей для выборки.
+        filters: Ограничения для отбора строк.
+        max_rows: Максимальное число строк в ответе.
+        include_schema: Если True, добавить схему таблицы даже при успешной выборке.
 
     Returns:
-        Валидированные параметры выгрузки событий клиента.
+        Валидированные параметры запроса к Spark-like таблице.
     """
 
-    epk_id: str = Field(description="Идентификатор клиента из таблицы сработок.")
-    event_dt: str = Field(description="Опорная дата в формате YYYY-MM-DD или YYYYMMDD.")
-    depth_days: int = Field(
-        default=180,
-        description="Глубина периода назад от event_dt, если start_date/end_date не заданы.",
+    table_name: str = Field(description="Имя Spark-like таблицы, например hits_extra_info, uko_event или cards_event.")
+    select_columns: list[str] = Field(
+        default_factory=list,
+        description="Минимально достаточный список полей для выборки. Выгрузка всех полей запрещена.",
     )
-    start_date: str | None = Field(
-        default=None,
-        description="Начальная дата периода в формате YYYY-MM-DD или YYYYMMDD.",
+    filters: list[SparkTableFilter] = Field(
+        default_factory=list,
+        description="Список фильтров, которые нужно применить к строкам таблицы.",
     )
-    end_date: str | None = Field(
-        default=None,
-        description="Конечная дата периода в формате YYYY-MM-DD или YYYYMMDD.",
+    max_rows: int = Field(
+        default=50,
+        ge=0,
+        le=1000,
+        description="Максимальное число строк в ответе. Значение 0 вернет только метаданные.",
     )
-    min_amount: float | None = Field(
-        default=None,
-        description="Минимальная сумма операции.",
-    )
-    merchant_name: str = Field(
-        default="",
-        description="Фильтр по названию merchant или организации.",
-    )
-    mcc_code: str = Field(
-        default="",
-        description="Фильтр по MCC-коду или MCC-описанию.",
-    )
-    recipient: str = Field(
-        default="",
-        description="Фильтр по получателю операции.",
-    )
-    event_type: str = Field(
-        default="",
-        description="Фильтр по типу события.",
-    )
-    max_rows: int | None = Field(
-        default=None,
-        description="Максимальное число строк после фильтрации.",
-    )
-
-
-class TriggerCasesByPeriodInput(BaseModel):
-    """Параметры получения всех сработок клиента из hits за период.
-
-    Args:
-        epk_id: Идентификатор клиента.
-        start_date: Начало периода в формате YYYY-MM-DD или YYYYMMDD.
-        end_date: Конец периода в формате YYYY-MM-DD или YYYYMMDD.
-
-    Returns:
-        Валидированные параметры запроса с установленными границами периода.
-    """
-
-    epk_id: str = Field(
-        description="Идентификатор клиента для поиска сработок за период.",
-    )
-    start_date: str = Field(
-        description="Начало периода в формате YYYY-MM-DD или YYYYMMDD.",
-    )
-    end_date: str = Field(
-        description="Конец периода в формате YYYY-MM-DD или YYYYMMDD.",
+    include_schema: bool = Field(
+        default=False,
+        description="Если True, вернуть схему таблицы вместе с результатом выборки.",
     )
 
 
@@ -244,13 +150,7 @@ def build_fake_spark_tools(
         transaction_count: int | None = None,
         day_event_count: int | None = None,
 ) -> list[BaseTool]:
-    """Создаёт Spark-like tools для поиска сработок и выгрузки событий клиента.
-
-    Логические группы:
-      - spark_lookup_trigger_cases       — поиск сработок в hits.
-      - spark_get_trigger_cases_by_period — все сработки клиента за период.
-      - spark_get_uko_events             — UKO-переводы / списания.
-      - spark_get_cards_events           — карточные операции.
+    """Создает один универсальный Spark-like tool для запросов к локальным CSV-таблицам.
 
     Args:
         delay_seconds: Искусственная задержка каждого tool-вызова в секундах.
@@ -259,475 +159,164 @@ def build_fake_spark_tools(
         day_event_count: Устаревший параметр совместимости, не влияет на результат.
 
     Returns:
-        Список LangChain tools для поиска сработок, UKO-переводов и карточных операций.
+        Список с одним LangChain tool: spark_query_table.
     """
 
     del transaction_count, day_event_count
     resolved_data_dir = Path(data_dir).resolve() if data_dir else DATA_DIR
 
-    async def spark_lookup_trigger_cases(
-            event_id: str | None = None,
-            epk_id: str | None = None,
-            event_dt: str | None = None,
-    ) -> dict[str, Any]:
-        """Ищет сработки в hits по event_id (точная) или epk_id+event_dt (все за день)."""
+    async def spark_query_table(
+            table_name: str,
+            select_columns: list[str] | None = None,
+            filters: list[SparkTableFilter] | None = None,
+            max_rows: int = 50,
+            include_schema: bool = False,
+    ) -> pd.DataFrame | dict[str, Any]:
+        """Выполняет универсальную выборку из Spark-like таблицы.
 
-        return await _spark_lookup_trigger_cases(
-            event_id=event_id,
-            epk_id=epk_id,
-            event_dt=event_dt,
-            data_dir=resolved_data_dir,
-            delay_seconds=delay_seconds,
-        )
+        Args:
+            table_name: Имя таблицы.
+            select_columns: Минимально достаточный список полей результата.
+            filters: Ограничения выборки.
+            max_rows: Максимальное число строк.
+            include_schema: Признак возврата схемы таблицы.
 
-    async def spark_get_trigger_cases_by_period(
-            epk_id: str,
-            start_date: str,
-            end_date: str,
-    ) -> dict[str, Any]:
-        """Ищет все сработки клиента в hits за указанный период."""
+        Returns:
+            DataFrame с результатом выборки или словарь с ошибкой и схемой таблицы.
+        """
 
-        return await _spark_get_trigger_cases_by_period(
-            epk_id=epk_id,
-            start_date=start_date,
-            end_date=end_date,
-            data_dir=resolved_data_dir,
-            delay_seconds=delay_seconds,
-        )
-
-    async def spark_get_uko_events(
-            epk_id: str,
-            event_dt: str,
-            depth_days: int = 180,
-            start_date: str | None = None,
-            end_date: str | None = None,
-            min_amount: float | None = None,
-            merchant_name: str = "",
-            mcc_code: str = "",
-            recipient: str = "",
-            event_type: str = "",
-            max_rows: int | None = None,
-    ) -> list[dict[str, Any]]:
-        """Выгружает UKO-переводы / списания клиента из uko_event."""
-
-        return await _spark_get_uko_events(
-            epk_id=epk_id,
-            event_dt=event_dt,
-            depth_days=depth_days,
-            start_date=start_date,
-            end_date=end_date,
-            min_amount=min_amount,
-            merchant_name=merchant_name,
-            mcc_code=mcc_code,
-            recipient=recipient,
-            event_type=event_type,
+        return await _spark_query_table(
+            table_name=table_name,
+            select_columns=select_columns or [],
+            filters=filters or [],
             max_rows=max_rows,
-            data_dir=resolved_data_dir,
-            delay_seconds=delay_seconds,
-        )
-
-    async def spark_get_cards_events(
-            epk_id: str,
-            event_dt: str,
-            depth_days: int = 180,
-            start_date: str | None = None,
-            end_date: str | None = None,
-            min_amount: float | None = None,
-            merchant_name: str = "",
-            mcc_code: str = "",
-            recipient: str = "",
-            event_type: str = "",
-            max_rows: int | None = None,
-    ) -> list[dict[str, Any]]:
-        """Выгружает карточные операции клиента из cards_event."""
-
-        return await _spark_get_cards_events(
-            epk_id=epk_id,
-            event_dt=event_dt,
-            depth_days=depth_days,
-            start_date=start_date,
-            end_date=end_date,
-            min_amount=min_amount,
-            merchant_name=merchant_name,
-            mcc_code=mcc_code,
-            recipient=recipient,
-            event_type=event_type,
-            max_rows=max_rows,
+            include_schema=include_schema,
             data_dir=resolved_data_dir,
             delay_seconds=delay_seconds,
         )
 
     return [
         StructuredTool.from_function(
-            coroutine=spark_lookup_trigger_cases,
-            name="spark_lookup_trigger_cases",
+            coroutine=spark_query_table,
+            name="spark_query_table",
             description=(
-                "spark_lookup_trigger_cases\n"
+                "spark_query_table\n"
                 "---\n"
-                "Описание: Поиск сработок (триггер-кейсов) в hits.\n"
-                "Use cases:\n"
-                "  - Найти конкретную сработку по её event_id.\n"
-                "  - Получить все сработки клиента за определённый день (epk_id + event_dt).\n"
-                "  - Проверить, была ли у клиента сработка в конкретную дату.\n\n"
+                "Описание: универсальная выборка из Spark-like таблиц. "
+                "Инструмент принимает имя таблицы, список полей, фильтры и лимит строк, "
+                "а при успешной выборке возвращает pandas DataFrame.\n"
+                "Если в select_columns или filters указанного поля нет в таблице, инструмент "
+                "вернет ok=False, описание ошибки и актуальную схему таблицы. "
+                "Выгрузка всех столбцов запрещена: агент должен явно указать "
+                "минимально достаточный набор колонок.\n\n"
                 "Параметры:\n"
-                "  event_id (str, опц.) — идентификатор конкретной сработки. "
-                "Если задан, поиск идёт только по нему.\n"
-                "  epk_id (str, опц.) — идентификатор клиента. Используется "
-                "в паре с event_dt для получения всех сработок за день.\n"
-                "  event_dt (str, опц.) — дата события в формате YYYY-MM-DD "
-                "или YYYYMMDD. Обязателен, если указан epk_id."
+                "  table_name (str, обяз.) — имя таблицы или алиас.\n"
+                "  select_columns (list[str], обяз.) — минимально достаточные поля результата. "
+                "Пустой список, '*' и 'all' запрещены.\n"
+                "  filters (list[dict], опц.) — фильтры вида "
+                "{column, operator, value/values}. Операторы: eq, ne, gt, gte, lt, lte, "
+                "contains, in, between, is_null, not_null.\n"
+                "  max_rows (int, опц., 50) — максимум строк в ответе, от 0 до 1000.\n"
+                "  include_schema (bool, опц., False) — вернуть схему при успешной выборке."
             ),
-            args_schema=TriggerCaseInput,
-        ),
-        StructuredTool.from_function(
-            coroutine=spark_get_trigger_cases_by_period,
-            name="spark_get_trigger_cases_by_period",
-            description=(
-                "spark_get_trigger_cases_by_period\n"
-                "---\n"
-                "Описание: Получение ВСЕХ сработок клиента из hits "
-                "за указанный период.\n"
-                "Use cases:\n"
-                "  - Получить историю всех сработок клиента за конкретный "
-                "диапазон дат.\n"
-                "  - Проанализировать динамику сработок клиента во временном "
-                "разрезе.\n"
-                "  - Использовать как вход для построения полной хронологии "
-                "событий вместе с UKO и карточными операциями.\n\n"
-                "Параметры:\n"
-                "  epk_id (str, обяз.) — идентификатор клиента.\n"
-                "  start_date (str, обяз.) — начало периода в формате "
-                "YYYY-MM-DD или YYYYMMDD.\n"
-                "  end_date (str, обяз.) — конец периода в формате "
-                "YYYY-MM-DD или YYYYMMDD."
-            ),
-            args_schema=TriggerCasesByPeriodInput,
-        ),
-        StructuredTool.from_function(
-            coroutine=spark_get_uko_events,
-            name="spark_get_uko_events",
-            description=(
-                "spark_get_uko_events\n"
-                "---\n"
-                "Описание: Выгрузка UKO-переводов / списаний клиента из uko_event.\n"
-                "Use cases:\n"
-                "  - Получить историю P2P-переводов клиента (по номеру телефона "
-                "или EPK).\n"
-                "  - Найти SBOL-платежи (по merchant).\n"
-                "  - Проанализировать расходы клиента за период с фильтром "
-                "по сумме, типу, MCC.\n"
-                "  - Выявить подозрительные переводы (крупные суммы, необычные "
-                "получатели).\n\n"
-                "Параметры:\n"
-                "  epk_id (str, обяз.) — идентификатор клиента из таблицы сработок.\n"
-                "  event_dt (str, обяз.) — опорная дата в формате YYYY-MM-DD "
-                "или YYYYMMDD.\n"
-                "  depth_days (int, опц., 180) — глубина периода назад от "
-                "event_dt, если start_date/end_date не заданы.\n"
-                "  start_date (str, опц.) — начало периода в формате YYYY-MM-DD "
-                "или YYYYMMDD.\n"
-                "  end_date (str, опц.) — конец периода в формате YYYY-MM-DD "
-                "или YYYYMMDD.\n"
-                "  min_amount (float, опц.) — минимальная сумма операции.\n"
-                "  merchant_name (str, опц.) — фильтр по названию merchant/организации "
-                "(поиск по подстроке в полях MERCHANT_COLUMNS).\n"
-                "  mcc_code (str, опц.) — фильтр по MCC-коду или описанию "
-                "(поиск по подстроке в MCC_COLUMNS).\n"
-                "  recipient (str, опц.) — фильтр по получателю (поиск по "
-                "подстроке в RECIPIENT_COLUMNS).\n"
-                "  event_type (str, опц.) — точный фильтр по типу события "
-                "(например 'OUT', 'IN').\n"
-                "  max_rows (int, опц.) — максимальное число строк в результате."
-            ),
-            args_schema=ClientTransactionsInput,
-        ),
-        StructuredTool.from_function(
-            coroutine=spark_get_cards_events,
-            name="spark_get_cards_events",
-            description=(
-                "spark_get_cards_events\n"
-                "---\n"
-                "Описание: Выгрузка карточных операций клиента из cards_event.\n"
-                "Use cases:\n"
-                "  - Проанализировать траты по картам (ATM, POS, онлайн).\n"
-                "  - Найти операции в конкретном merchant (магазин) или MCC "
-                "(категория).\n"
-                "  - Проверить подозрительные карточные операции (крупные "
-                "суммы, необычное время).\n"
-                "  - Сопоставить карточные траты с UKO-переводами для "
-                "полной картины расходов клиента.\n\n"
-                "ВАЖНО: cards_event НЕ содержит явного epk_id. Связь "
-                "строится через event_id/user_id из таблицы сработок.\n\n"
-                "Параметры:\n"
-                "  epk_id (str, обяз.) — идентификатор клиента из таблицы сработок.\n"
-                "  event_dt (str, обяз.) — опорная дата в формате YYYY-MM-DD "
-                "или YYYYMMDD.\n"
-                "  depth_days (int, опц., 180) — глубина периода назад от "
-                "event_dt, если start_date/end_date не заданы.\n"
-                "  start_date (str, опц.) — начало периода в формате YYYY-MM-DD "
-                "или YYYYMMDD.\n"
-                "  end_date (str, опц.) — конец периода в формате YYYY-MM-DD "
-                "или YYYYMMDD.\n"
-                "  min_amount (float, опц.) — минимальная сумма операции.\n"
-                "  merchant_name (str, опц.) — фильтр по названию merchant/организации "
-                "(поиск по подстроке в полях MERCHANT_COLUMNS).\n"
-                "  mcc_code (str, опц.) — фильтр по MCC-коду или описанию "
-                "(поиск по подстроке в MCC_COLUMNS).\n"
-                "  recipient (str, опц.) — фильтр по получателю (поиск по "
-                "подстроке в RECIPIENT_COLUMNS).\n"
-                "  event_type (str, опц.) — точный фильтр по типу события "
-                "(например 'PURCHASE', 'WITHDRAWAL').\n"
-                "  max_rows (int, опц.) — максимальное число строк в результате."
-            ),
-            args_schema=ClientTransactionsInput,
+            args_schema=SparkTableQueryInput,
         ),
     ]
 
 
-async def _spark_lookup_trigger_cases(
+async def _spark_query_table(
         *,
-        event_id: str | None,
-        epk_id: str | None,
-        event_dt: str | None,
+        table_name: str,
+        select_columns: list[str],
+        filters: list[SparkTableFilter],
+        max_rows: int,
+        include_schema: bool,
         data_dir: Path,
         delay_seconds: float,
-) -> dict[str, Any]:
-    """Ищет сработки в таблице hits по event_id или по epk_id + event_dt.
-
-    Use cases:
-      - Точечный поиск: известен event_id → получить одну сработку.
-      - Дневной поиск: известен epk_id + event_dt → получить все сработки
-        клиента за конкретную дату.
+) -> pd.DataFrame | dict[str, Any]:
+    """Выполняет выборку из Spark-like таблицы с проверкой полей.
 
     Args:
-        event_id: Идентификатор конкретной сработки (точный поиск).
-        epk_id: Идентификатор клиента для поиска всех сработок за день.
-        event_dt: Дата события для дневного поиска (YYYY-MM-DD или YYYYMMDD).
+        table_name:  имя таблицы.
+        select_columns: Минимально достаточные поля результата.
+        filters: Список фильтров.
+        max_rows: Максимальное число строк.
+        include_schema: Признак возврата схемы при успешном ответе.
         data_dir: Директория с CSV-файлами.
         delay_seconds: Искусственная задержка запроса.
 
     Returns:
-        Словарь с признаком found и найденными строками из таблицы сработок.
+        DataFrame с результатом выборки или словарь с ошибкой и схемой таблицы.
     """
 
     await _fake_sleep(delay_seconds)
-    hits = _load_hits_table(data_dir)
-
-    if event_id:
-        matched = hits[hits["event_id"].astype(str) == str(event_id)].copy()
-        records = _to_records(matched)
-        if not records:
-            return {
-                "found": False,
-                "mode": "event_id",
-                "event_id": event_id,
-                "source_file": HITS_FILE,
-            }
+    registry = _get_table_registry()
+    normalized_table_name = table_name.strip()
+    table_meta = registry.get(normalized_table_name)
+    if table_meta is None:
         return {
-            "found": True,
-            "mode": "event_id",
-            "event_id": event_id,
-            "source_file": HITS_FILE,
-            "record": records[0],
+            "ok": False,
+            "error": {
+                "code": "unknown_table",
+                "message": f"Таблица '{table_name}' не найдена.",
+                "available_tables": sorted(registry),
+            },
         }
 
-    normalized_dt = _normalize_event_dt(event_dt)
-    matched = hits[
-        (hits["epk_id"].astype(str) == str(epk_id))
-        & (hits["_lookup_event_dt"] == normalized_dt)
-    ].copy()
-    return {
-        "found": not matched.empty,
-        "mode": "epk_id_event_dt",
-        "epk_id": str(epk_id),
-        "event_dt": normalized_dt,
-        "source_file": HITS_FILE,
-        "records_count": int(len(matched)),
-        "records": _to_records(matched),
-    }
+    table = _load_spark_table(data_dir=data_dir, table_name=normalized_table_name)
+    schema = _get_table_schema(table_name=normalized_table_name, source_file=table_meta["file"], table=table)
+    select_error = _validate_select_columns_present(select_columns)
+    if select_error is not None:
+        return {
+            "ok": False,
+            "table_name": normalized_table_name,
+            "source_file": table_meta["file"],
+            "error": select_error,
+            "schema": schema,
+        }
+    missing_columns = _validate_query_columns(table=table, select_columns=select_columns, filters=filters)
+    if missing_columns:
+        return {
+            "ok": False,
+            "table_name": normalized_table_name,
+            "source_file": table_meta["file"],
+            "error": {
+                "code": "unknown_columns",
+                "message": "В таблице нет одного или нескольких полей из запроса.",
+                "missing_columns": missing_columns,
+            },
+            "schema": schema,
+        }
+
+    filtered = _apply_filters(table=table, filters=filters)
+    result_columns = select_columns
+    result = filtered.loc[:, result_columns].head(max(0, int(max_rows))).copy()
+    if include_schema:
+        result.attrs["spark_schema"] = schema
+    result.attrs["spark_table_name"] = normalized_table_name
+    result.attrs["spark_source_file"] = table_meta["file"]
+    result.attrs["spark_total_rows"] = int(len(table))
+    result.attrs["spark_matched_rows"] = int(len(filtered))
+    return result
 
 
-async def _spark_get_trigger_cases_by_period(
-        *,
-        epk_id: str,
-        start_date: str,
-        end_date: str,
-        data_dir: Path,
-        delay_seconds: float,
-) -> dict[str, Any]:
-    """Ищет ВСЕ сработки клиента в hits за указанный период.
-
-    Use cases:
-      - Получить историю всех сработок клиента за конкретный диапазон дат.
-      - Проанализировать динамику сработок клиента во временном разрезе.
-      - Использовать как вход для построения полной хронологии событий
-        вместе с UKO и карточными операциями.
-
-    Args:
-        epk_id: Идентификатор клиента.
-        start_date: Начало периода (YYYY-MM-DD или YYYYMMDD).
-        end_date: Конец периода (YYYY-MM-DD или YYYYMMDD).
-        data_dir: Директория с CSV-файлами.
-        delay_seconds: Искусственная задержка запроса.
-
-    Returns:
-        Словарь с признаком found и списком сработок за период.
-    """
-
-    await _fake_sleep(delay_seconds)
-    hits = _load_hits_table(data_dir)
-
-    parsed_start = _parse_event_dt(start_date)
-    parsed_end = _parse_event_dt(end_date)
-    normalized_start = parsed_start.strftime("%Y%m%d")
-    normalized_end = parsed_end.strftime("%Y%m%d")
-
-    matched = hits[
-        (hits["_lookup_epk_id"].astype(str) == str(epk_id))
-        & (hits["_lookup_event_dt"].astype(str) >= normalized_start)
-        & (hits["_lookup_event_dt"].astype(str) <= normalized_end)
-    ].copy()
-
-    return {
-        "found": not matched.empty,
-        "epk_id": str(epk_id),
-        "start_date": parsed_start.isoformat(),
-        "end_date": parsed_end.isoformat(),
-        "source_file": HITS_FILE,
-        "records_count": int(len(matched)),
-        "records": _to_records(matched),
-    }
-
-
-async def _spark_get_uko_events(
-        *,
-        epk_id: str,
-        event_dt: str,
-        depth_days: int,
-        start_date: str | None,
-        end_date: str | None,
-        min_amount: float | None,
-        merchant_name: str,
-        mcc_code: str,
-        recipient: str,
-        event_type: str,
-        max_rows: int | None,
-        data_dir: Path,
-        delay_seconds: float,
-) -> list[dict[str, Any]]:
-    """Выгружает UKO-переводы / списания клиента из таблицы uko_event.
-
-    Use cases:
-      - Получить историю P2P-переводов клиента за N дней.
-      - Найти SBOL-платежи в пользу конкретного merchant.
-      - Проанализировать все операции клиента с суммой >= X.
-      - Выявить операции определённого типа (OUT, IN) за период.
+def _load_spark_table(*, data_dir: Path, table_name: str) -> pd.DataFrame:
+    """Загружает Spark-like таблицу по логическому имени.
 
     Args:
-        epk_id: Идентификатор клиента из таблицы сработок.
-        event_dt: Опорная дата выгрузки.
-        depth_days: Глубина периода назад от event_dt.
-        start_date: Начальная дата периода.
-        end_date: Конечная дата периода.
-        min_amount: Минимальная сумма операции.
-        merchant_name: Фильтр по merchant/организации.
-        mcc_code: Фильтр по MCC.
-        recipient: Фильтр по получателю.
-        event_type: Фильтр по типу события.
-        max_rows: Максимальное число строк.
         data_dir: Директория с CSV-файлами.
-        delay_seconds: Искусственная задержка запроса.
+        table_name: Имя таблицы или алиас из реестра.
 
     Returns:
-        Список JSON-совместимых строк из uko_event.
+        DataFrame с содержимым CSV-файла.
     """
 
-    await _fake_sleep(delay_seconds)
-    table = _load_uko_table(data_dir)
-    result = _export_client_transactions(
-        table=table,
-        epk_id=epk_id,
-        event_dt=event_dt,
-        depth_days=depth_days,
-        start_date=start_date,
-        end_date=end_date,
-        min_amount=min_amount,
-        merchant_name=merchant_name,
-        mcc_code=mcc_code,
-        recipient=recipient,
-        event_type=event_type,
-        max_rows=max_rows,
-    )
-    return _to_records(result)
+    table_meta = _get_table_registry()[table_name]
+    path = data_dir / table_meta["file"]
+    return _load_csv_table(str(path.resolve())).copy()
 
 
-async def _spark_get_cards_events(
-        *,
-        epk_id: str,
-        event_dt: str,
-        depth_days: int,
-        start_date: str | None,
-        end_date: str | None,
-        min_amount: float | None,
-        merchant_name: str,
-        mcc_code: str,
-        recipient: str,
-        event_type: str,
-        max_rows: int | None,
-        data_dir: Path,
-        delay_seconds: float,
-) -> list[dict[str, Any]]:
-    """Выгружает карточные операции клиента из таблицы cards_event.
-
-    Use cases:
-      - Проанализировать траты по картам (ATM, POS, онлайн) за период.
-      - Найти операции в конкретном магазине (merchant_name) или категории (MCC).
-      - Проверить подозрительные крупные списания с карты.
-      - Сопоставить карточные траты с UKO-переводами для полной картины
-        расходов клиента.
-
-    ВАЖНО: cards_event не содержит epk_id напрямую. Связь с клиентом
-    устанавливается через event_id / user_id из таблицы hits-сработок.
-
-    Args:
-        epk_id: Идентификатор клиента из таблицы сработок.
-        event_dt: Опорная дата выгрузки.
-        depth_days: Глубина периода назад от event_dt.
-        start_date: Начальная дата периода.
-        end_date: Конечная дата периода.
-        min_amount: Минимальная сумма операции.
-        merchant_name: Фильтр по merchant/организации.
-        mcc_code: Фильтр по MCC.
-        recipient: Фильтр по получателю.
-        event_type: Фильтр по типу события.
-        max_rows: Максимальное число строк.
-        data_dir: Директория с CSV-файлами.
-        delay_seconds: Искусственная задержка запроса.
-
-    Returns:
-        Список JSON-совместимых строк из cards_event.
-    """
-
-    await _fake_sleep(delay_seconds)
-    table = _load_cards_table(data_dir)
-    result = _export_client_transactions(
-        table=table,
-        epk_id=epk_id,
-        event_dt=event_dt,
-        depth_days=depth_days,
-        start_date=start_date,
-        end_date=end_date,
-        min_amount=min_amount,
-        merchant_name=merchant_name,
-        mcc_code=mcc_code,
-        recipient=recipient,
-        event_type=event_type,
-        max_rows=max_rows,
-    )
-    return _to_records(result)
-
-
-@lru_cache(maxsize=8)
+@lru_cache(maxsize=16)
 def _load_csv_table(path_text: str) -> pd.DataFrame:
     """Загружает CSV-файл с кешированием по абсолютному пути.
 
@@ -741,359 +330,216 @@ def _load_csv_table(path_text: str) -> pd.DataFrame:
     return pd.read_csv(path_text, low_memory=False)
 
 
-def _load_hits_table(data_dir: Path) -> pd.DataFrame:
-    """Загружает таблицу сработок и добавляет технические поля поиска.
+def _get_table_registry() -> dict[str, dict[str, str]]:
+    """Возвращает реестр доступных Spark-like таблиц и алиасов.
 
     Args:
-        data_dir: Директория с CSV-файлами.
+        Отсутствуют.
 
     Returns:
-        DataFrame таблицы hits с нормализованными датами и источником.
+        Словарь, где ключ — имя таблицы, а значение содержит имя CSV-файла.
     """
 
-    path = data_dir / HITS_FILE
-    table = _load_csv_table(str(path.resolve())).copy()
-    table["_source_table"] = "hits_extra_info"
-    table["_source_file"] = HITS_FILE
-    table["_lookup_epk_id"] = table["epk_id"].astype(str)
-    table["_lookup_event_dt"] = table["event_dt"].map(_normalize_event_dt)
-    table["_lookup_event_date"] = table["_lookup_event_dt"].map(_date_text_from_yyyymmdd)
-    return table
+    return {
+        "hits": {"file": HITS_FILE},
+        "hits_extra_info": {"file": HITS_FILE},
+        "uko_event": {"file": UKO_FILE},
+        "cards_event": {"file": CARDS_FILE},
+        "history_automarking": {"file": HISTORY_AUTOMARKING_FILE},
+        "demo_client_timeline": {"file": DEMO_TIMELINE_FILE},
+        "source_1": {"file": SOURCE_1_FILE},
+        "source_2": {"file": SOURCE_2_FILE},
+        "source_3": {"file": SOURCE_3_FILE},
+    }
 
 
-def _load_uko_table(data_dir: Path) -> pd.DataFrame:
-    """Загружает таблицу uko_event и обогащает ее связью с таблицей hits.
-
-    Args:
-        data_dir: Директория с CSV-файлами.
-
-    Returns:
-        DataFrame uko_event с техническими полями epk/date для фильтрации.
-    """
-
-    table = _load_csv_table(str((data_dir / UKO_FILE).resolve())).copy()
-    return _enrich_operational_table(
-        table=table,
-        hits=_load_hits_table(data_dir),
-        source_table="uko_event",
-        source_file=UKO_FILE,
-    )
-
-
-def _load_cards_table(data_dir: Path) -> pd.DataFrame:
-    """Загружает таблицу cards_event и обогащает ее связью с таблицей hits.
+def _get_table_schema(*, table_name: str, source_file: str, table: pd.DataFrame) -> dict[str, Any]:
+    """Формирует схему Spark-like таблицы по DataFrame.
 
     Args:
-        data_dir: Директория с CSV-файлами.
-
-    Returns:
-        DataFrame cards_event с техническими полями epk/date для фильтрации.
-    """
-
-    table = _load_csv_table(str((data_dir / CARDS_FILE).resolve())).copy()
-    return _enrich_operational_table(
-        table=table,
-        hits=_load_hits_table(data_dir),
-        source_table="cards_event",
-        source_file=CARDS_FILE,
-    )
-
-
-def _enrich_operational_table(
-        *,
-        table: pd.DataFrame,
-        hits: pd.DataFrame,
-        source_table: str,
-        source_file: str,
-) -> pd.DataFrame:
-    """Добавляет к операционной таблице технические поля связи с hits.
-
-    Args:
-        table: Операционная таблица cards_event или uko_event.
-        hits: Таблица сработок с event_id, epk_id, user_id и event_dt.
-        source_table: Логическое имя источника.
+        table_name: Логическое имя таблицы.
         source_file: Имя CSV-файла источника.
+        table: DataFrame, для которого нужна схема.
 
     Returns:
-        Обогащенный DataFrame для последующей фильтрации по epk_id и датам.
+        Словарь со списком колонок, типами и признаком nullable.
     """
 
-    hit_lookup = hits[
-        ["event_id", "_lookup_epk_id", "user_id", "event_time", "_lookup_event_dt"]
-    ].rename(
-        columns={
-            "event_id": "_join_event_id",
-            "_lookup_epk_id": "_hit_epk_id",
-            "user_id": "_linked_hit_user_id",
-            "event_time": "_linked_hit_event_time",
-            "_lookup_event_dt": "_hit_event_dt",
+    return {
+        "table_name": table_name,
+        "source_file": source_file,
+        "columns_count": int(len(table.columns)),
+        "columns": [
+            {
+                "name": column,
+                "type": str(table[column].dtype),
+                "nullable": bool(table[column].isna().any()),
+            }
+            for column in table.columns
+        ],
+    }
+
+
+def _validate_select_columns_present(select_columns: list[str]) -> dict[str, Any] | None:
+    """Проверяет, что запрошен явный минимальный набор колонок.
+
+    Args:
+        select_columns: Поля, которые агент хочет выгрузить.
+
+    Returns:
+        None для корректного списка или словарь ошибки для ответа tool.
+    """
+
+    normalized = {str(column).strip().lower() for column in select_columns}
+    if not normalized or "" in normalized:
+        return {
+            "code": "select_columns_required",
+            "message": (
+                "Нужно явно указать минимально достаточный список полей в select_columns. "
+                "Выгрузка всех столбцов запрещена."
+            ),
         }
-    )
-    enriched = table.merge(
-        hit_lookup,
-        left_on=table["event_id"].astype(str),
-        right_on=hit_lookup["_join_event_id"].astype(str),
-        how="left",
-    ).drop(columns=["key_0", "_join_event_id"], errors="ignore")
-
-    table_epk = (
-        enriched["epk_id"].astype(str)
-        if "epk_id" in enriched.columns
-        else pd.Series([None] * len(enriched), index=enriched.index, dtype="object")
-    )
-    table_dt = (
-        enriched["event_dt"].map(_normalize_event_dt)
-        if "event_dt" in enriched.columns
-        else pd.Series([None] * len(enriched), index=enriched.index, dtype="object")
-    )
-
-    enriched["_source_table"] = source_table
-    enriched["_source_file"] = source_file
-    enriched["_linked_hit_event_id"] = enriched["event_id"].astype(str)
-    enriched["_lookup_epk_id"] = enriched["_hit_epk_id"].where(
-        enriched["_hit_epk_id"].notna(),
-        table_epk,
-    ).astype(str)
-    enriched["_lookup_event_dt"] = enriched["_hit_event_dt"].where(
-        enriched["_hit_event_dt"].notna(),
-        table_dt,
-    )
-    enriched["_lookup_event_date"] = enriched["_lookup_event_dt"].map(_date_text_from_yyyymmdd)
-    return enriched
+    if normalized & {"*", "all"}:
+        return {
+            "code": "select_all_forbidden",
+            "message": (
+                "Запрещено запрашивать все столбцы таблицы. Укажите только поля, "
+                "которые действительно нужны для текущей задачи."
+            ),
+            "forbidden_columns": sorted(normalized & {"*", "all"}),
+        }
+    return None
 
 
-def _export_client_transactions(
+def _validate_query_columns(
         *,
         table: pd.DataFrame,
-        epk_id: str,
-        event_dt: str,
-        depth_days: int,
-        start_date: str | None,
-        end_date: str | None,
-        min_amount: float | None,
-        merchant_name: str,
-        mcc_code: str,
-        recipient: str,
-        event_type: str,
-        max_rows: int | None,
-) -> pd.DataFrame:
-    """Фильтрует операционные события клиента по периоду и параметрам.
+        select_columns: list[str],
+        filters: list[SparkTableFilter],
+) -> list[str]:
+    """Проверяет, что все запрошенные поля есть в таблице.
 
     Args:
-        table: Операционная таблица с техническими полями поиска.
-        epk_id: Идентификатор клиента.
-        event_dt: Опорная дата.
-        depth_days: Глубина периода назад от опорной даты.
-        start_date: Начальная дата периода.
-        end_date: Конечная дата периода.
-        min_amount: Минимальная сумма.
-        merchant_name: Фильтр по merchant.
-        mcc_code: Фильтр по MCC.
-        recipient: Фильтр по получателю.
-        event_type: Фильтр по типу события.
-        max_rows: Максимальное число строк.
+        table: Таблица для проверки.
+        select_columns: Поля результата.
+        filters: Фильтры, поля которых нужно проверить.
 
     Returns:
-        Отфильтрованный DataFrame.
+        Отсортированный список отсутствующих полей.
     """
 
-    result = table[table["_lookup_epk_id"].astype(str) == str(epk_id)].copy()
-    result = _filter_by_period(
-        table=result,
-        event_dt=event_dt,
-        depth_days=depth_days,
-        start_date=start_date,
-        end_date=end_date,
-    )
-    result = _apply_optional_filters(
-        table=result,
-        min_amount=min_amount,
-        merchant_name=merchant_name,
-        mcc_code=mcc_code,
-        recipient=recipient,
-        event_type=event_type,
-    )
-    if max_rows is not None:
-        result = result.head(max(0, int(max_rows))).copy()
-    return result
+    requested_columns = set(select_columns)
+    requested_columns.update(filter_item.column for filter_item in filters)
+    return sorted(column for column in requested_columns if column not in table.columns)
 
 
-def _filter_by_period(
-        *,
-        table: pd.DataFrame,
-        event_dt: str,
-        depth_days: int,
-        start_date: str | None,
-        end_date: str | None,
-) -> pd.DataFrame:
-    """Фильтрует строки по периоду относительно опорной даты.
+def _apply_filters(*, table: pd.DataFrame, filters: list[SparkTableFilter]) -> pd.DataFrame:
+    """Последовательно применяет фильтры к таблице.
 
     Args:
-        table: Таблица с колонкой _lookup_event_dt.
-        event_dt: Опорная дата.
-        depth_days: Глубина периода назад, если границы не заданы.
-        start_date: Начальная дата периода.
-        end_date: Конечная дата периода.
-
-    Returns:
-        DataFrame со строками внутри выбранного периода.
-    """
-
-    anchor = _parse_event_dt(event_dt)
-    period_start = _parse_event_dt(start_date) if start_date else anchor - timedelta(days=max(0, depth_days))
-    period_end = _parse_event_dt(end_date) if end_date else anchor
-    normalized_start = period_start.strftime("%Y%m%d")
-    normalized_end = period_end.strftime("%Y%m%d")
-    date_values = table["_lookup_event_dt"].astype(str)
-    return table[
-        (date_values >= normalized_start)
-        & (date_values <= normalized_end)
-    ].copy()
-
-
-def _apply_optional_filters(
-        *,
-        table: pd.DataFrame,
-        min_amount: float | None,
-        merchant_name: str,
-        mcc_code: str,
-        recipient: str,
-        event_type: str,
-) -> pd.DataFrame:
-    """Применяет необязательные фильтры к операционной таблице.
-
-    Args:
-        table: Таблица для фильтрации.
-        min_amount: Минимальная сумма операции.
-        merchant_name: Текстовый фильтр по merchant.
-        mcc_code: Текстовый фильтр по MCC.
-        recipient: Текстовый фильтр по получателю.
-        event_type: Точный фильтр по типу события.
+        table: Исходная таблица.
+        filters: Список фильтров.
 
     Returns:
         Отфильтрованный DataFrame.
     """
 
     result = table.copy()
-    if min_amount is not None and "transaction_amount" in result.columns:
-        result = result[pd.to_numeric(result["transaction_amount"], errors="coerce") >= float(min_amount)]
-    if merchant_name:
-        result = _filter_text_any_column(result, MERCHANT_COLUMNS, merchant_name)
-    if mcc_code:
-        result = _filter_text_any_column(result, MCC_COLUMNS, mcc_code)
-    if recipient:
-        result = _filter_text_any_column(result, RECIPIENT_COLUMNS, recipient)
-    if event_type and "event_type" in result.columns:
-        result = result[
-            result["event_type"].astype(str).str.lower() == event_type.lower()
-        ]
-    return result.copy()
+    for filter_item in filters:
+        result = _apply_filter(table=result, filter_item=filter_item)
+    return result
 
 
-def _filter_text_any_column(
-        table: pd.DataFrame,
-        candidate_columns: tuple[str, ...],
-        value: str,
-) -> pd.DataFrame:
-    """Фильтрует строки по вхождению текста хотя бы в одной из колонок.
+def _apply_filter(*, table: pd.DataFrame, filter_item: SparkTableFilter) -> pd.DataFrame:
+    """Применяет один фильтр к таблице.
 
     Args:
         table: Таблица для фильтрации.
-        candidate_columns: Возможные колонки для поиска.
-        value: Искомый текст.
+        filter_item: Описание фильтра.
 
     Returns:
-        DataFrame со строками, где найдено значение.
+        DataFrame со строками, которые соответствуют фильтру.
     """
 
-    existing_columns = [column for column in candidate_columns if column in table.columns]
-    if not existing_columns:
-        return table.iloc[0:0].copy()
+    series = table[filter_item.column]
+    operator = filter_item.operator
+    if operator == "is_null":
+        return table[series.isna()].copy()
+    if operator == "not_null":
+        return table[series.notna()].copy()
+    if operator == "contains":
+        value = "" if filter_item.value is None else str(filter_item.value)
+        return table[series.astype(str).str.contains(value, case=False, na=False, regex=False)].copy()
+    if operator == "in":
+        values = [_coerce_filter_value(series=series, value=value) for value in filter_item.values or []]
+        comparable = _get_comparable_series(series=series, value=values[0] if values else None)
+        return table[comparable.isin(values)].copy()
+    if operator == "between":
+        values = filter_item.values or []
+        left = _coerce_filter_value(series=series, value=values[0])
+        right = _coerce_filter_value(series=series, value=values[1])
+        comparable = _get_comparable_series(series=series, value=left)
+        return table[(comparable >= left) & (comparable <= right)].copy()
 
-    mask = pd.Series(False, index=table.index)
-    for column in existing_columns:
-        mask = mask | table[column].astype(str).str.contains(value, case=False, na=False)
+    value = _coerce_filter_value(series=series, value=filter_item.value)
+    comparable = _get_comparable_series(series=series, value=value)
+    if operator == "eq":
+        mask = comparable == value
+    elif operator == "ne":
+        mask = comparable != value
+    elif operator == "gt":
+        mask = comparable > value
+    elif operator == "gte":
+        mask = comparable >= value
+    elif operator == "lt":
+        mask = comparable < value
+    elif operator == "lte":
+        mask = comparable <= value
+    else:
+        raise ValueError(f"Неподдерживаемый оператор фильтра: {operator}")
     return table[mask].copy()
 
 
-def _normalize_event_dt(value: Any) -> str | None:
-    """Нормализует дату к строке YYYYMMDD.
+def _get_comparable_series(*, series: pd.Series, value: Any) -> pd.Series:
+    """Готовит колонку к сравнению со значением фильтра.
 
     Args:
-        value: Дата, число или строка даты.
+        series: Исходная колонка таблицы.
+        value: Значение фильтра после базового приведения.
 
     Returns:
-        Строка YYYYMMDD или None для пустого значения.
+        Колонка, приведенная к числовому типу или строке, если это нужно для сравнения.
     """
 
-    if value is None or pd.isna(value):
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    if text.endswith(".0"):
-        text = text[:-2]
-    if len(text) == 8 and text.isdigit():
-        return text
-    return _parse_event_dt(text).strftime("%Y%m%d")
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce")
+    if value is None:
+        return series
+    numeric_series = pd.to_numeric(series, errors="coerce")
+    numeric_value = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if not pd.isna(numeric_value) and numeric_series.notna().any():
+        return numeric_series
+    return series.astype(str)
 
 
-def _parse_event_dt(value: str | None) -> date:
-    """Разбирает дату в форматах YYYY-MM-DD и YYYYMMDD.
+def _coerce_filter_value(*, series: pd.Series, value: Any) -> Any:
+    """Приводит значение фильтра к типу колонки, если это возможно.
 
     Args:
-        value: Строковое значение даты.
+        series: Колонка, с которой сравнивается значение.
+        value: Исходное значение фильтра.
 
     Returns:
-        Объект date.
+        Значение, приведенное к числу для числовых колонок, иначе исходное значение.
     """
 
     if value is None:
-        raise ValueError("Дата обязательна для Spark-like инструмента.")
-    text = str(value).strip()
-    if len(text) == 8 and text.isdigit():
-        return datetime.strptime(text, "%Y%m%d").date()
-    return datetime.strptime(text[:10], "%Y-%m-%d").date()
-
-
-def _date_text_from_yyyymmdd(value: Any) -> str | None:
-    """Преобразует YYYYMMDD в YYYY-MM-DD.
-
-    Args:
-        value: Дата в формате YYYYMMDD, YYYY-MM-DD, число pandas/numpy или пустое значение.
-
-    Returns:
-        Дата в формате YYYY-MM-DD или None.
-    """
-
-    normalized = _normalize_event_dt(value)
-    if not normalized:
         return None
-    return datetime.strptime(normalized, "%Y%m%d").date().isoformat()
-
-
-def _to_records(table: pd.DataFrame) -> list[dict[str, Any]]:
-    """Преобразует DataFrame в JSON-совместимый список словарей.
-
-    Args:
-        table: Таблица для сериализации.
-
-    Returns:
-        Список словарей без NaN-значений и технических колонок с внутренними NaN.
-    """
-
-    serializable = table.where(pd.notna(table), None).copy()
-    records = serializable.to_dict(orient="records")
-    cleaned_records: list[dict[str, Any]] = []
-    for record in records:
-        cleaned_records.append(
-            {
-                key: _clean_value(value)
-                for key, value in record.items()
-                if key not in {"_hit_epk_id", "_hit_event_dt"}
-            }
-        )
-    return cleaned_records
+    numeric_series = pd.to_numeric(series, errors="coerce")
+    numeric_value = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if pd.api.types.is_numeric_dtype(series) or (not pd.isna(numeric_value) and numeric_series.notna().any()):
+        return _clean_value(numeric_value)
+    return str(value) if pd.api.types.is_string_dtype(series) else value
 
 
 def _clean_value(value: Any) -> Any:
@@ -1126,192 +572,8 @@ async def _fake_sleep(delay_seconds: float) -> None:
     await asyncio.sleep(max(0.0, float(delay_seconds)))
 
 
-_SOURCE_FILE_MAP = {
-    "source_1": SOURCE_1_FILE,
-    "source_2": SOURCE_2_FILE,
-    "source_3": SOURCE_3_FILE,
-}
-
-
-class SourceToSandboxInput(BaseModel):
-    """Параметры загрузки или предпросмотра CSV-источника.
-
-    Args:
-        source_name: Имя источника: "source_1", "source_2" или "source_3".
-        preview: Если True — показать первые 5 строк без загрузки в sandbox.
-        load: Если True — загрузить DataFrame в переменную песочницы.
-        variable_name: Имя переменной в sandbox. Если не указано, df_{source_name}.
-    """
-
-    source_name: str = Field(
-        description="Имя источника: 'source_1', 'source_2' или 'source_3'.",
-    )
-    preview: bool = Field(
-        default=False,
-        description="Если True — показать первые 5 строк без загрузки в sandbox.",
-    )
-    load: bool = Field(
-        default=False,
-        description="Если True — загрузить DataFrame в переменную песочницы.",
-    )
-    variable_name: str | None = Field(
-        default=None,
-        description="Имя переменной в sandbox. Если не указано, df_{source_name}.",
-    )
-
-    @model_validator(mode="after")
-    def validate_source_name(self) -> "SourceToSandboxInput":
-        if self.source_name not in _SOURCE_FILE_MAP:
-            raise ValueError(
-                f"Неизвестный источник '{self.source_name}'. "
-                f"Допустимые: {list(_SOURCE_FILE_MAP)}"
-            )
-        return self
-
-
-def build_spark_source_to_sandbox_tool(
-    sandbox: Any,
-    *,
-    data_dir: str | Path | None = None,
-    delay_seconds: float = 1.5,
-) -> list[BaseTool]:
-    """Создаёт инструмент для загрузки или предпросмотра CSV-источника в/из песочницы.
-
-    Логическая группа: работа с CSV-источниками (source_1, source_2, source_3).
-
-    Use cases:
-      - Посмотреть структуру и первые строки источника, не загружая его в sandbox.
-      - Загрузить CSV-источник как pandas DataFrame в переменную песочницы для
-        дальнейшего анализа кодом.
-      - Получить метаданные источника (число строк, колонки) без preview/load.
-
-    Args:
-        sandbox: Экземпляр ClientPythonSandbox для добавления переменных.
-        data_dir: Директория с CSV-файлами. По умолчанию examples/data.
-        delay_seconds: Искусственная задержка.
-
-    Returns:
-        Список с одним LangChain tool.
-    """
-    resolved_data_dir = Path(data_dir).resolve() if data_dir else DATA_DIR
-
-    async def spark_source_to_sandbox(
-        source_name: str,
-        preview: bool = False,
-        load: bool = False,
-        variable_name: str | None = None,
-    ) -> dict[str, Any]:
-        """Загружает CSV-источник (source_1/2/3) в песочницу или показывает preview.
-
-        Use cases:
-          - Посмотреть структуру данных в source_1 без загрузки (preview=True).
-          - Загрузить source_2 как pandas DataFrame в sandbox для кодового анализа.
-          - Сразу preview + загрузить source_3 в переменную sandbox.
-
-        Args:
-            source_name: "source_1", "source_2" или "source_3".
-            preview: Если True — показать первые 5 строк.
-            load: Если True — загрузить DataFrame в sandbox.
-            variable_name: Имя переменной в sandbox (по умолчанию df_{source_name}).
-
-        Returns:
-            Словарь с результатом.
-        """
-        source_file = _SOURCE_FILE_MAP[source_name]
-        var_name = variable_name or f"df_{source_name}"
-
-        await _fake_sleep(delay_seconds)
-
-        path = str((resolved_data_dir / source_file).resolve())
-        df = _load_csv_table(path)
-
-        if load:
-            await sandbox.add_variable(var_name, df)
-            rows_preview = _to_records(df.head(5)) if preview else []
-            result = {
-                "mode": "load",
-                "source_name": source_name,
-                "source_file": source_file,
-                "variable_name": var_name,
-                "total_rows": len(df),
-                "columns": list(df.columns),
-                "rows_count": len(df),
-                "message": (
-                    f"Данные из {source_file} ({len(df)} строк, "
-                    f"{len(df.columns)} колонок) загружены в переменную "
-                    f"'{var_name}' песочницы."
-                ),
-            }
-            if preview:
-                result["preview_rows"] = rows_preview
-                result["preview_count"] = len(rows_preview)
-            return result
-
-        if preview:
-            rows = _to_records(df.head(5))
-            return {
-                "mode": "preview",
-                "source_name": source_name,
-                "source_file": source_file,
-                "total_rows": len(df),
-                "columns": list(df.columns),
-                "rows_count": len(rows),
-                "rows": rows,
-                "message": (
-                    f"Предпросмотр {source_file}: первые {len(rows)} из "
-                    f"{len(df)} строк, {len(df.columns)} колонок."
-                ),
-            }
-
-        # Ни preview, ни load — просто метаданные
-        return {
-            "mode": "info",
-            "source_name": source_name,
-            "source_file": source_file,
-            "total_rows": len(df),
-            "columns": list(df.columns),
-            "rows_count": len(df),
-            "message": (
-                f"Источник {source_file}: {len(df)} строк, "
-                f"{len(df.columns)} колонок. Укажите preview=True "
-                "для предпросмотра или load=True для загрузки в песочницу."
-            ),
-        }
-
-    return [
-        StructuredTool.from_function(
-            coroutine=spark_source_to_sandbox,
-            name="spark_source_to_sandbox",
-            description=(
-                "spark_source_to_sandbox\n"
-                "---\n"
-                "Описание: Загрузка CSV-источника (source_1/2/3) в песочницу "
-                "как pandas DataFrame, либо предпросмотр.\n"
-                "Use cases:\n"
-                "  - Посмотреть первые 5 строк source_1 (preview=True).\n"
-                "  - Загрузить source_2 в sandbox для анализа кодом (load=True).\n"
-                "  - Сразу preview + загрузить source_3 (preview=True & load=True).\n"
-                "  - Получить метаданные (число строк, список колонок).\n\n"
-                "Параметры:\n"
-                "  source_name (str, обяз.) — имя источника: 'source_1', "
-                "'source_2' или 'source_3'.\n"
-                "  preview (bool, опц., False) — если True, вернуть первые "
-                "5 строк без загрузки в sandbox.\n"
-                "  load (bool, опц., False) — если True, загрузить DataFrame "
-                "в переменную песочницы.\n"
-                "  variable_name (str, опц.) — имя переменной в sandbox. "
-                "По умолчанию df_{source_name}."
-            ),
-            args_schema=SourceToSandboxInput,
-        ),
-    ]
-
-
 __all__ = [
-    "ClientTransactionsInput",
-    "TriggerCaseInput",
-    "TriggerCasesByPeriodInput",
-    "SourceToSandboxInput",
+    "SparkTableFilter",
+    "SparkTableQueryInput",
     "build_fake_spark_tools",
-    "build_spark_source_to_sandbox_tool",
 ]

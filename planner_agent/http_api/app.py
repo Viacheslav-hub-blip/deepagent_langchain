@@ -5,7 +5,6 @@
 - invoke_agent_run: endpoint запуска нового или follow-up ResearchRun.
 - invoke_branch_run: endpoint создания и запуска branch ResearchRun.
 - build_dialog_context: endpoint preview dialog context для follow-up запусков.
-- _mount_static_ui: подключение статического analyst UI, если папка существует.
 - _services: извлечение контейнера сервисов из состояния приложения.
 - _require_agent: проверка наличия агента в API services.
 - _build_run_response: сбор ответа запуска агента.
@@ -23,7 +22,6 @@ from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import BaseMessage
 
 from planner_agent.chat_runner import build_chat_initial_state
@@ -65,7 +63,7 @@ def create_app(
         settings: ApiSettings | None = None,
         services: ApiServices | None = None,
 ) -> FastAPI:
-    """Создает FastAPI приложение для research-agent UI.
+    """Создает FastAPI приложение для research-agent SDK.
 
     Args:
         settings: Настройки путей и API-префикса. Если ``None``, используются
@@ -151,7 +149,6 @@ def create_app(
                 "context_runs": [
                     item.model_dump(mode="json") for item in request.context_runs
                 ],
-                "configurable": request.configurable,
             }
         )
         return _build_run_response(api=api, messages=messages)
@@ -672,33 +669,7 @@ def create_app(
         except FileNotFoundError as exc:
             raise _not_found(str(exc)) from exc
 
-    _mount_static_ui(app)
     return app
-
-
-
-
-def _mount_static_ui(app: FastAPI) -> None:
-    """Подключает статический фронтенд к FastAPI, если каталог существует.
-
-    Ищет ``<корень_репозитория>/ui/analyst_ui`` (на один уровень выше пакета
-    ``planner_agent``). Если каталога нет, приложение остаётся чистым REST API.
-
-    Args:
-        app: FastAPI приложение, к которому нужно подключить папку со статикой.
-
-    Returns:
-        ``None``.
-    """
-
-    project_root = Path(__file__).resolve().parents[2]
-    ui_dir = project_root / "ui" / "analyst_ui"
-    if ui_dir.is_dir():
-        app.mount(
-            "/app",
-            StaticFiles(directory=ui_dir, html=True),
-            name="analyst_ui",
-        )
 
 
 def _services(app: FastAPI) -> ApiServices:
@@ -946,4 +917,3 @@ def _branch_started_node_id(api: ApiServices, run_id: str) -> str | None:
 
 
 __all__ = ["create_app"]
-

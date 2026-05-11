@@ -4,7 +4,7 @@ import unittest
 
 from langchain_core.tools import tool
 
-from planner_agent.graph import build_research_graph
+from planner_agent.factory import planner_agent
 from planner_agent.tools.registry import ToolRegistry
 
 
@@ -68,7 +68,7 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertEqual(registry.enabled(["missing"], strict=False), [])
 
     def test_factory_uses_registry_enabled_subset_without_changing_public_api(self) -> None:
-        graph = build_research_graph(
+        graph = planner_agent(
             model=object(),
             sandbox=FakeSandbox(),
             tools=[alpha_tool, beta_tool],

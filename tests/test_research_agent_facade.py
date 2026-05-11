@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from asyncio import run
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.runnables import Runnable
 
 from planner_agent.models import AgentState
@@ -217,26 +217,6 @@ class ResearchAgentFacadeTests(unittest.TestCase):
             self.assertTrue(all(item[-1].content == "# Report\n\nFacade works" for item in batch_results))
             self.assertTrue(all(item[-1].content == "# Report\n\nFacade works" for item in abatch_results))
 
-    def test_agent_accepts_langchain_messages_as_input(self) -> None:
-        """Проверяет вход в формате списка LangChain messages."""
-
-        with tempfile.TemporaryDirectory() as tmp:
-            lineage = LineageService(tmp)
-            artifacts = ArtifactService(tmp)
-            agent = ResearchAgent(
-                graph=FakeGraph(lineage, artifacts),
-                lineage_service=lineage,
-                artifact_service=artifacts,
-                runs_dir=tmp,
-            )
-
-            messages = agent.invoke([HumanMessage(content="Analyze messages input")])
-
-            self.assertEqual(messages[-1].content, "# Report\n\nFacade works")
-            self.assertIsNotNone(agent.last_state)
-            assert agent.last_state is not None
-            self.assertEqual(agent.last_state.initial_user_query, "Analyze messages input")
-
     def test_agent_accepts_optional_context_runs_without_breaking_langchain_input(self) -> None:
         """Проверяет необязательный dialog context поверх существующих runs."""
 
@@ -277,7 +257,7 @@ class ResearchAgentFacadeTests(unittest.TestCase):
 
             messages = agent.invoke(
                 {
-                    "input": "Compare prior run with current hypothesis",
+                    "user_query": "Compare prior run with current hypothesis",
                     "context_runs": [
                         {
                             "run_id": context_run.run_id,

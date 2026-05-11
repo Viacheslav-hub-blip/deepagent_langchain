@@ -29,9 +29,64 @@ from ..tools.artifact_read_tools import build_artifact_read_tools
 from ..tools.artifact_wrappers import wrap_tools_for_artifacts
 from ..tools.skill_tools import build_skill_read_tools
 
-WORKER_INVOKE_MESSAGE: str = (
-    "Выполни поставленную задачу "
-)
+def _worker_human_invoke_message(task: Task) -> str:
+    """Формирует human-сообщение для ReAct worker-а.
+
+    Args:
+        task: Текущая задача worker-а.
+
+    Returns:
+        Текст инструкции с задачей, выделенной парным тегом ``TASK``.
+    """
+
+    desc = (task.description or "").strip()
+    task_id = task.task_id or DEFAULT_TASK_ID
+    retry_context = _format_worker_retry_context(task)
+    if desc:
+        message = (
+            "Выполни поставленную задачу:\n"
+            f"<TASK {task_id}>\n{desc}\n</TASK {task_id}>"
+        )
+    else:
+        message = "Выполни поставленную задачу"
+    if retry_context:
+        return f"{message}\n\n{retry_context}"
+    return message
+
+
+def _format_worker_retry_context(task: Task) -> str:
+    """Формирует контекст прошлой неуспешной попытки для worker-а.
+
+    Args:
+        task: Текущая задача с сохраненными ``generated_code`` и ``error_log``.
+
+    Returns:
+        XML-подобный блок с кодом и ошибкой прошлой попытки или пустую строку.
+    """
+
+    blocks: list[str] = []
+    if task.generated_code:
+        blocks.append(
+            "<previous_generated_code>\n"
+            f"{task.generated_code}\n"
+            "</previous_generated_code>"
+        )
+    if task.error_log:
+        blocks.append(
+            "<previous_execution_error>\n"
+            f"{task.error_log}\n"
+            "</previous_execution_error>"
+        )
+    if not blocks:
+        return ""
+    return "\n".join(
+        [
+            "<previous_worker_attempt>",
+            "Используй этот код и ошибку как контекст для исправленного повторного выполнения.",
+            *blocks,
+            "</previous_worker_attempt>",
+        ]
+    )
 
 # Заглушка при отсутствии загруженных переменных
 NO_VARIABLES_PLACEHOLDER: str = "Переменные не загружены"
@@ -330,6 +385,16 @@ async def _create_worker_system_prompt(
 
 
 def _format_task_contract(task: Task) -> str:
+    """Форматирует контракт текущей задачи для worker prompt.
+
+    Args:
+        task: Текущая задача worker-а с ожидаемым результатом, artifacts,
+            tools и skills.
+
+    Returns:
+        XML-подобный блок контракта задачи или пустую строку.
+    """
+
     blocks: list[str] = []
     if task.expected_output:
         blocks.append(f"expected_output: {task.expected_output}")
@@ -345,7 +410,16 @@ def _format_task_contract(task: Task) -> str:
 
     if not blocks:
         return ""
-    return "\n".join(["<task_contract>", *blocks, "</task_contract>"])
+    task_id = task.task_id or DEFAULT_TASK_ID
+    return "\n".join(
+        [
+            f"<TASK {task_id}>",
+            "<task_contract>",
+            *blocks,
+            "</task_contract>",
+            f"</TASK {task_id}>",
+        ]
+    )
 
 
 def _format_resolved_inputs(resolved_inputs: dict[str, Any]) -> str:
@@ -396,9 +470,11 @@ def _format_dependency_context(dependency_context: dict[str, Any]) -> str:
     for dependency in dependencies:
         if not isinstance(dependency, dict):
             continue
+        task_id = str(dependency.get("task_id") or DEFAULT_TASK_ID)
+        lines.append(f"<TASK {task_id}>")
         lines.append(
             (
-                f"- task_id: {dependency.get('task_id')}; "
+                f"task_id: {dependency.get('task_id')}; "
                 f"status: {dependency.get('status')}; "
                 f"output_variable_name: {dependency.get('output_variable_name')}; "
                 f"artifact_refs: {dependency.get('artifact_refs')}; "
@@ -410,6 +486,7 @@ def _format_dependency_context(dependency_context: dict[str, Any]) -> str:
             lines.append(f"  error_log: {dependency.get('error_log')}")
         if dependency.get("validation_reason"):
             lines.append(f"  validation_reason: {dependency.get('validation_reason')}")
+        lines.append(f"</TASK {task_id}>")
     lines.append("</dependency_context>")
     return "\n".join(lines)
 
@@ -425,6 +502,16 @@ def _format_filesystem_context(filesystem_context: dict[str, str]) -> str:
 
 
 def _format_artifact_context(artifact_context: dict[str, Any]) -> str:
+    """Форматирует artifact context для worker prompt.
+
+    Args:
+        artifact_context: Словарь с выбранными artifacts и метаданными лимитов.
+
+    Returns:
+        XML-подобный блок, где каждый artifact выделен парным тегом
+        ``ARTIFACT``, или пустая строка.
+    """
+
     artifacts = artifact_context.get("artifacts")
     if not isinstance(artifacts, dict) or not artifacts:
         return ""
@@ -439,15 +526,18 @@ def _format_artifact_context(artifact_context: dict[str, Any]) -> str:
     for artifact_id, artifact in artifacts.items():
         if not isinstance(artifact, dict):
             continue
+        artifact_tag_id = str(artifact_id).strip() or "unknown"
+        lines.append(f"<ARTIFACT {artifact_tag_id}>")
         lines.append(
             (
-                f"- artifact_id: {artifact_id}; "
+                f"artifact_id: {artifact_id}; "
                 f"kind: {artifact.get('kind')}; "
                 f"uri: {artifact.get('uri')}; "
                 f"summary: {artifact.get('summary')}; "
                 f"metadata: {artifact.get('metadata') or {}}"
             )
         )
+        lines.append(f"</ARTIFACT {artifact_tag_id}>")
     lines.append("</artifact_context>")
     return "\n".join(lines)
 
@@ -558,9 +648,11 @@ async def _apply_tool_output(task: Task, raw_output: str) -> bool:
         return True
 
     if isinstance(parsed, dict) and "success" in parsed:
-        if parsed["success"]:
+        if parsed.get("generated_code"):
             task.generated_code = parsed.get("generated_code")
+        if parsed.get("target_variable"):
             task.output_variable_name = parsed.get("target_variable")
+        if parsed["success"]:
             task.result_preview = (
                     parsed.get("variable_preview")
                     or parsed.get("message")
@@ -569,11 +661,7 @@ async def _apply_tool_output(task: Task, raw_output: str) -> bool:
             task.error_log = None
             return True
 
-        task.error_log = (
-                parsed.get("error")
-                or parsed.get("message")
-                or "Неизвестная ошибка инструмента"
-        )
+        task.error_log = _format_tool_error_log(parsed)
         task.result_preview = parsed.get("message")
         return False
 
@@ -581,6 +669,29 @@ async def _apply_tool_output(task: Task, raw_output: str) -> bool:
     task.result_preview = _limit_text(str(parsed), max_chars=RESULT_PREVIEW_MAX_LEN)
     task.error_log = None
     return True
+
+
+def _format_tool_error_log(parsed: dict[str, Any]) -> str:
+    """Формирует лог ошибки инструмента для сохранения в задаче и retry-контексте.
+
+    Args:
+        parsed: Распарсенный JSON-ответ инструмента с полями ошибки выполнения.
+
+    Returns:
+        Многострочный текст ошибки, который передается следующей попытке worker-а.
+    """
+
+    lines = [
+        str(
+            parsed.get("error")
+            or parsed.get("message")
+            or "Неизвестная ошибка инструмента"
+        )
+    ]
+    if parsed.get("execution_output"):
+        lines.append("stdout/stderr:")
+        lines.append(str(parsed.get("execution_output")))
+    return "\n".join(line for line in lines if line)
 
 
 def _limit_text(text: str, *, max_chars: int) -> str:
@@ -772,6 +883,7 @@ async def worker_node(
         task=task,
         artifact_index=artifact_index,
         tool_traces=tool_traces,
+        sandbox=sandbox,
     )
 
     # Собираем список установленных пакетов для информирования модели
@@ -783,13 +895,14 @@ async def worker_node(
         loaded_skills=loaded_skills,
         installed_packages=installed_packages,
     )
+    human_invoke = _worker_human_invoke_message(task)
     prompt_trace_artifacts = write_prompt_trace(
         artifact_service=artifact_service,
         run_id=payload.run_id,
         node_id=worker_started_node_id,
         stage="worker",
         system_prompt=system_prompt,
-        human_prompt=WORKER_INVOKE_MESSAGE,
+        human_prompt=human_invoke,
         payload={
             "task": task.model_dump(mode="json"),
             "resolved_inputs": payload.resolved_inputs,
@@ -810,7 +923,7 @@ async def worker_node(
 
     try:
         response = await agent.ainvoke(
-            {"messages": [HumanMessage(content=WORKER_INVOKE_MESSAGE)]},
+            {"messages": [HumanMessage(content=human_invoke)]},
             config={"recursion_limit": REACT_AGENT_RECURSION_LIMIT},
         )
         messages = response.get("messages", [])
@@ -1122,6 +1235,7 @@ def _write_worker_artifacts(
 
     task_id = task.task_id or DEFAULT_TASK_ID
     safe_task_id = _safe_filename_fragment(task_id)
+    retry_suffix = f"_r{task.retry_count}" if task.retry_count else ""
     artifacts: dict[str, Any] = {}
 
     result_content = _task_result_content(task)
@@ -1139,6 +1253,7 @@ def _write_worker_artifacts(
                 "task_status": task.status.value,
                 "artifact_role": "worker_result",
             },
+            artifact_id=f"t{safe_task_id}{retry_suffix}_result",
         )
         task.artifact_refs.append(result_artifact.artifact_id)
         artifacts[result_artifact.artifact_id] = result_artifact.model_dump(mode="json")
@@ -1158,9 +1273,11 @@ def _write_worker_artifacts(
                 "artifact_role": "generated_code_trace",
                 "persistent_executable": False,
             },
+            artifact_id=f"t{safe_task_id}{retry_suffix}_code",
         )
-        task.artifact_refs.append(code_artifact.artifact_id)
         artifacts[code_artifact.artifact_id] = code_artifact.model_dump(mode="json")
+        # generated_code уже доступен напрямую через task.generated_code и
+        # tool_calls trace, поэтому в task.artifact_refs его не дублируем.
 
     return artifacts
 

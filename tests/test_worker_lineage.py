@@ -69,9 +69,11 @@ class WorkerLineageTests(unittest.TestCase):
             self.assertEqual(nodes[-1].node_type, "task_completed")
             self.assertEqual(nodes[-1].parent_ids, [started_id])
             self.assertEqual(nodes[-1].metadata["task_id"], "1")
-            self.assertEqual(len(nodes[-1].artifact_refs), 2)
-            self.assertEqual(len(task.artifact_refs), 2)
-            self.assertEqual(set(nodes[-1].artifact_refs), set(artifact_index))
+            # task.artifact_refs хранит только worker_result; code_trace
+            # доступен через state.artifact_index, но не дублируется в refs.
+            self.assertEqual(len(task.artifact_refs), 1)
+            self.assertEqual(nodes[-1].artifact_refs, task.artifact_refs)
+            self.assertEqual(len(artifact_index), 2)
 
             stored_artifacts = artifacts.list_artifacts(run_record.run_id)
             self.assertEqual(
@@ -80,6 +82,9 @@ class WorkerLineageTests(unittest.TestCase):
             )
             self.assertTrue(stored_artifacts[0].uri.endswith("result.md"))
             self.assertTrue(stored_artifacts[1].uri.endswith("code_trace.txt"))
+            # Артефакты получают человеко-читаемые id вида ``t{task}_result``/``t{task}_code``.
+            self.assertEqual(stored_artifacts[0].artifact_id, "t1_result")
+            self.assertEqual(stored_artifacts[1].artifact_id, "t1_code")
 
             snapshot = lineage.load_snapshot(run_record.run_id, nodes[-1].node_id)
             self.assertEqual(snapshot["task"]["status"], "needs_validation")

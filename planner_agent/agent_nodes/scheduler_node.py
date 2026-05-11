@@ -27,6 +27,9 @@ WAITING_STATUSES = {TaskStatus.RUNNING, TaskStatus.NEEDS_VALIDATION}
 # Сообщения об ошибках и состояниях
 MSG_EMPTY_PLAN = "Planner returned an empty plan."
 MSG_NO_EXECUTABLE_TASKS = "No executable tasks remain."
+MSG_BLOCKED_BY_UNFINISHED_DEPENDENCIES = (
+    "Execution plan is blocked by unfinished dependencies; redirecting to replanner."
+)
 MAX_ARTIFACTS_IN_WORKER_CONTEXT = 12
 MAX_DEPENDENCY_RESULT_CHARS = 3_000
 MAX_DEPENDENCY_ERROR_CHARS = 2_000
@@ -36,7 +39,10 @@ EXCLUDED_WORKER_CONTEXT_ARTIFACT_ROLES = {
     "prompt_trace",
     "prompt_payload",
     "tool_call_trace",
+    "tool_calls_trace",
 }
+
+GOTO_REPLANNER = "replanner"
 
 
 def _collect_ancestor_data(
@@ -248,6 +254,85 @@ def _collect_ancestor_task_ids(
     return ordered
 
 
+def _find_tasks_blocked_by_unfinished_dependencies(
+    plan: dict[str, Task],
+) -> list[dict[str, Any]]:
+    """Находит задачи, заблокированные невыполненными зависимостями.
+
+    Args:
+        plan: Текущий runtime-план, где ключом является идентификатор задачи,
+            а значением объект задачи с зависимостями и статусом.
+
+    Returns:
+        Список словарей с диагностикой по задачам ``pending``/``ready``, которые
+        невозможно запустить из-за отсутствующих, ``failed`` или ``skipped``
+        зависимостей.
+    """
+
+    blocked_tasks: list[dict[str, Any]] = []
+    blocking_statuses = {TaskStatus.FAILED, TaskStatus.SKIPPED}
+
+    for task_id, task in plan.items():
+        if task.status not in {TaskStatus.PENDING, TaskStatus.READY}:
+            continue
+
+        blockers: list[dict[str, str]] = []
+        for parent_id in task.dependencies:
+            parent = plan.get(parent_id)
+            if parent is None:
+                blockers.append({"task_id": parent_id, "status": "missing"})
+                continue
+            if parent.status in blocking_statuses:
+                blockers.append(
+                    {"task_id": parent_id, "status": parent.status.value}
+                )
+
+        if blockers:
+            blocked_tasks.append(
+                {
+                    "task_id": task_id,
+                    "status": task.status.value,
+                    "description": task.description,
+                    "blocked_by": blockers,
+                }
+            )
+
+    return blocked_tasks
+
+
+def _build_blocked_plan_feedback(blocked_tasks: list[dict[str, Any]]) -> dict[str, Any]:
+    """Формирует диагностический feedback для replanner-а при блокировке плана.
+
+    Args:
+        blocked_tasks: Список заблокированных задач с идентификаторами,
+            статусами и причинами блокировки.
+
+    Returns:
+        Словарь, который добавляется в ``feedback_context`` и объясняет
+        replanner-у, какие зависимости нужно заменить или перепланировать.
+    """
+
+    blocked_ids = [
+        str(item.get("task_id"))
+        for item in blocked_tasks
+        if item.get("task_id") is not None
+    ]
+    return {
+        "summary": MSG_BLOCKED_BY_UNFINISHED_DEPENDENCIES,
+        "failed_task_diagnosis": blocked_tasks,
+        "suggested_investigations": [
+            "Создать replacement/retry-задачи для failed/skipped зависимостей.",
+            "Переназначить downstream-зависимости на новые исполнимые задачи.",
+        ],
+        "replan_guidance": (
+            "Не оставляй pending/ready задачи в зависимости от failed, skipped "
+            "или отсутствующих задач. Если результат невыполненной задачи все еще "
+            "нужен, создай новую задачу с новым task_id и переведи зависимые "
+            f"шаги на нее. Заблокированные задачи: {', '.join(blocked_ids)}."
+        ),
+    }
+
+
 async def scheduler_node(
     state: AgentState,
     lineage_service: LineageService | None = None,
@@ -375,6 +460,19 @@ async def scheduler_node(
     # Ожидание выполнения других задач
     if any(task.status in WAITING_STATUSES for task in plan.values()):
         return Command(update={})
+
+    blocked_tasks = _find_tasks_blocked_by_unfinished_dependencies(plan)
+    if blocked_tasks:
+        feedback = _build_blocked_plan_feedback(blocked_tasks)
+        return Command(
+            goto=GOTO_REPLANNER,
+            update={
+                "messages": [
+                    AIMessage(content=MSG_BLOCKED_BY_UNFINISHED_DEPENDENCIES)
+                ],
+                "feedback_context": [feedback],
+            },
+        )
 
     # Нет доступных для выполнения задач
     return Command(

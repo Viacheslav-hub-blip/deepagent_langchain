@@ -12,8 +12,6 @@
 - _resolve_directory: нормализация директорий относительно workspace.
 - _selected_run_id: выбор run_id для read API.
 - _coerce_input_payload: нормализация входа Runnable.
-- _coerce_messages: нормализация списка сообщений.
-- _last_human_message_content: извлечение последнего пользовательского сообщения.
 - _coerce_agent_state: нормализация результата graph в AgentState.
 - _run_coro_sync: запуск coroutine из синхронного invoke.
 - _normalize_batch_config: нормализация config для batch/abatch.
@@ -27,19 +25,13 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import (
-    AIMessage,
-    BaseMessage,
-    HumanMessage,
-    SystemMessage,
-    ToolMessage,
-)
+from langchain_core.messages import BaseMessage
 from langchain_core.runnables import Runnable, RunnableConfig
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
 from .chat_runner import build_chat_initial_state, run_agent_from_state
-from .graph import build_research_graph
+from .factory import planner_agent
 from .models import AgentState
 from .prompts import AnalysisAgentPrompts
 from .schemas.artifacts import Artifact
@@ -78,21 +70,9 @@ class ResearchAgentInput(BaseModel):
         default=None,
         description="Идентификатор пользователя, если он известен.",
     )
-    messages: list[BaseMessage] = Field(
-        default_factory=list,
-        description="Опциональная история LangChain messages для совместимости.",
-    )
     filesystem_context: dict[str, str] = Field(
         default_factory=dict,
         description="Дополнительные сведения о рабочих файлах и директориях.",
-    )
-    metadata: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Метаданные внешнего приложения; агент их не выводит пользователю.",
-    )
-    configurable: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Дополнительные параметры интеграции в стиле RunnableConfig.",
     )
     context_runs: list[ContextRunRef] = Field(
         default_factory=list,
@@ -180,7 +160,7 @@ class ResearchAgent(Runnable[Any, list[BaseMessage]]):
         if sandbox is None:
             raise ValueError("sandbox is required when graph is not provided")
 
-        self.graph = build_research_graph(
+        self.graph = planner_agent(
             model=model,
             sandbox=sandbox,
             tools=tools or [],
@@ -214,7 +194,7 @@ class ResearchAgent(Runnable[Any, list[BaseMessage]]):
         """Синхронно запускает агента через стандартный LangChain ``invoke``.
 
         Args:
-            input: Строка запроса, список сообщений, словарь, ResearchAgentInput или AgentState.
+            input: Строка запроса, словарь, ResearchAgentInput или AgentState.
             config: Опциональный LangChain/LangGraph config.
             **kwargs: Дополнительные поля запуска: ``session_id``, ``user_id``,
                 ``filesystem_context``.
@@ -240,7 +220,7 @@ class ResearchAgent(Runnable[Any, list[BaseMessage]]):
         """Асинхронно запускает агента через стандартный LangChain ``ainvoke``.
 
         Args:
-            input: Строка запроса, список сообщений, словарь, ResearchAgentInput или AgentState.
+            input: Строка запроса, словарь, ResearchAgentInput или AgentState.
             config: Опциональный LangChain/LangGraph config.
             **kwargs: Дополнительные поля запуска: ``session_id``, ``user_id``,
                 ``filesystem_context``.
@@ -672,7 +652,7 @@ class ResearchAgent(Runnable[Any, list[BaseMessage]]):
         """Преобразует LangChain Runnable input в AgentState.
 
         Args:
-            input: Строка, список сообщений, словарь, ResearchAgentInput или AgentState.
+            input: Строка, словарь, ResearchAgentInput или AgentState.
             **kwargs: Переопределения ``session_id``, ``user_id`` и
                 ``filesystem_context``.
 
@@ -681,7 +661,7 @@ class ResearchAgent(Runnable[Any, list[BaseMessage]]):
 
         Raises:
             TypeError: Если вход имеет неподдерживаемый тип.
-            ValueError: Если вход не содержит ни ``user_query``, ни ``messages``, ни ``state``.
+            ValueError: Если вход не содержит ни ``user_query``, ни ``state``.
         """
 
         if isinstance(input, AgentState):
@@ -692,10 +672,8 @@ class ResearchAgent(Runnable[Any, list[BaseMessage]]):
             return payload.state
 
         user_query = kwargs.pop("user_query", None) or payload.user_query
-        if not user_query and payload.messages:
-            user_query = _last_human_message_content(payload.messages)
         if not user_query:
-            raise ValueError("ResearchAgent input must include user_query, messages, or state")
+            raise ValueError("ResearchAgent input must include user_query or state")
 
         session_id = kwargs.pop("session_id", payload.session_id)
         user_id = kwargs.pop("user_id", payload.user_id)
@@ -709,8 +687,6 @@ class ResearchAgent(Runnable[Any, list[BaseMessage]]):
             user_id=user_id,
             filesystem_context=filesystem_context,
         )
-        if payload.messages:
-            state.messages = payload.messages
         if payload.context_runs:
             dialog_context = self.dialog_context_service.build_context(payload.context_runs)
             if dialog_context.rendered_context:
@@ -777,7 +753,7 @@ def _coerce_input_payload(input: Any) -> ResearchAgentInput:
     """Преобразует произвольный Runnable input в ResearchAgentInput.
 
     Args:
-        input: Строка запроса, список сообщений, dict или ResearchAgentInput.
+        input: Строка запроса, dict или ResearchAgentInput.
 
     Returns:
         Нормализованный ResearchAgentInput.
@@ -790,87 +766,11 @@ def _coerce_input_payload(input: Any) -> ResearchAgentInput:
         return input
     if isinstance(input, str):
         return ResearchAgentInput(user_query=input)
-    if isinstance(input, list):
-        return ResearchAgentInput(messages=_coerce_messages(input))
     if isinstance(input, dict):
-        payload = dict(input)
-        if "query" in payload and "user_query" not in payload:
-            payload["user_query"] = payload["query"]
-        if "input" in payload and "user_query" not in payload:
-            payload["user_query"] = payload["input"]
-        if "messages" in payload:
-            payload["messages"] = _coerce_messages(payload["messages"])
-        return ResearchAgentInput.model_validate(payload)
+        return ResearchAgentInput.model_validate(input)
     raise TypeError(
-        "ResearchAgent input must be str, list[BaseMessage], dict, "
-        "ResearchAgentInput, or AgentState"
+        "ResearchAgent input must be str, dict, ResearchAgentInput, or AgentState"
     )
-
-
-def _coerce_messages(messages: Any) -> list[BaseMessage]:
-    """Преобразует список сообщений в LangChain BaseMessage.
-
-    Args:
-        messages: Список BaseMessage, строк или dict с role/type и content.
-
-    Returns:
-        Список LangChain BaseMessage.
-
-    Raises:
-        TypeError: Если элемент сообщения не поддерживается.
-    """
-
-    if not isinstance(messages, list):
-        raise TypeError("messages must be a list")
-
-    result: list[BaseMessage] = []
-    for item in messages:
-        if isinstance(item, BaseMessage):
-            result.append(item)
-            continue
-        if isinstance(item, str):
-            result.append(HumanMessage(content=item))
-            continue
-        if isinstance(item, dict):
-            role = str(item.get("role") or item.get("type") or "human").lower()
-            content = item.get("content", "")
-            if role in {"human", "user"}:
-                result.append(HumanMessage(content=content))
-            elif role in {"ai", "assistant"}:
-                result.append(AIMessage(content=content))
-            elif role == "system":
-                result.append(SystemMessage(content=content))
-            elif role == "tool":
-                result.append(
-                    ToolMessage(
-                        content=content,
-                        tool_call_id=str(item.get("tool_call_id") or "unknown"),
-                    )
-                )
-            else:
-                result.append(HumanMessage(content=content))
-            continue
-        raise TypeError(f"Unsupported message item type: {type(item)!r}")
-    return result
-
-
-def _last_human_message_content(messages: list[BaseMessage]) -> str:
-    """Возвращает содержимое последнего HumanMessage.
-
-    Args:
-        messages: История LangChain messages.
-
-    Returns:
-        Текст последнего HumanMessage или первого сообщения, если HumanMessage нет.
-    """
-
-    human = next(
-        (message for message in reversed(messages) if isinstance(message, HumanMessage)),
-        None,
-    )
-    if human is not None:
-        return str(human.content)
-    return str(messages[-1].content) if messages else ""
 
 
 def _coerce_agent_state(raw_result: Any, *, fallback: AgentState) -> AgentState:

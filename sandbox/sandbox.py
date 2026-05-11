@@ -291,7 +291,7 @@ class ClientPythonSandbox:
         Формирует короткое текстовое превью переменной по её имени.
 
         Для DataFrame-подобных объектов возвращает структурированное описание
-        (форма, колонки, типы, первая строка, наличие NaN).
+        (форма, колонки, типы, наличие NaN).
         Для прочих объектов возвращает строковое представление,
         обрезанное до _PREVIEW_MAX_LENGTH символов.
 
@@ -312,9 +312,6 @@ class ClientPythonSandbox:
                 dtypes = {
                     str(col): str(dtype) for col, dtype in value.dtypes.items()
                 }
-                first_rows = value.head(_DATAFRAME_HEAD_ROWS).to_dict(
-                    orient="records"
-                )
                 nan_flags = {
                     str(col): bool(value[col].isna().any())
                     for col in value.columns
@@ -323,7 +320,6 @@ class ClientPythonSandbox:
                     f"DataFrame shape: {value.shape}\n"
                     f"Columns: {columns}\n"
                     f"Dtypes: {dtypes}\n"
-                    f"First row: {first_rows[0] if first_rows else {} }\n"
                     f"Has NaN: {nan_flags}"
                 )
 

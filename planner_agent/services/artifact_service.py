@@ -48,6 +48,7 @@ class ArtifactService:
         mime_type: str = "text/plain",
         summary: str = "",
         metadata: dict[str, Any] | None = None,
+        artifact_id: str | None = None,
     ) -> Artifact:
         """Создает новый файл artifact внутри каталога запуска и регистрирует его в индексе.
 
@@ -60,6 +61,9 @@ class ArtifactService:
             mime_type: MIME-тип содержимого.
             summary: Краткое описание artifact.
             metadata: Дополнительные metadata artifact.
+            artifact_id: Опциональный человеко-читаемый идентификатор. Если задан и
+                уже занят в текущем запуске, к нему добавляется короткий
+                числовой суффикс для уникальности.
 
         Returns:
             Созданная запись Artifact.
@@ -81,16 +85,20 @@ class ArtifactService:
             target.write_text(content, encoding="utf-8")
             payload = content.encode("utf-8")
 
-        artifact = Artifact(
-            run_id=run_id,
-            node_id=node_id,
-            kind=kind,
-            uri=str(target),
-            mime_type=mime_type,
-            summary=summary,
-            checksum=hashlib.sha256(payload).hexdigest(),
-            metadata=normalize_artifact_metadata(metadata, kind=kind),
-        )
+        resolved_id = self._resolve_unique_artifact_id(run_id, artifact_id)
+        artifact_kwargs: dict[str, Any] = {
+            "run_id": run_id,
+            "node_id": node_id,
+            "kind": kind,
+            "uri": str(target),
+            "mime_type": mime_type,
+            "summary": summary,
+            "checksum": hashlib.sha256(payload).hexdigest(),
+            "metadata": normalize_artifact_metadata(metadata, kind=kind),
+        }
+        if resolved_id:
+            artifact_kwargs["artifact_id"] = resolved_id
+        artifact = Artifact(**artifact_kwargs)
         append_jsonl(self._index_path(run_id), artifact)
         return artifact
 
@@ -105,6 +113,7 @@ class ArtifactService:
         summary: str = "",
         checksum: str = "",
         metadata: dict[str, Any] | None = None,
+        artifact_id: str | None = None,
     ) -> Artifact:
         """Регистрирует уже существующий artifact URI без копирования файла.
 
@@ -122,16 +131,20 @@ class ArtifactService:
             Зарегистрированная запись Artifact.
         """
 
-        artifact = Artifact(
-            run_id=run_id,
-            node_id=node_id,
-            kind=kind,
-            uri=uri,
-            mime_type=mime_type,
-            summary=summary,
-            checksum=checksum,
-            metadata=normalize_artifact_metadata(metadata, kind=kind),
-        )
+        resolved_id = self._resolve_unique_artifact_id(run_id, artifact_id)
+        artifact_kwargs: dict[str, Any] = {
+            "run_id": run_id,
+            "node_id": node_id,
+            "kind": kind,
+            "uri": uri,
+            "mime_type": mime_type,
+            "summary": summary,
+            "checksum": checksum,
+            "metadata": normalize_artifact_metadata(metadata, kind=kind),
+        }
+        if resolved_id:
+            artifact_kwargs["artifact_id"] = resolved_id
+        artifact = Artifact(**artifact_kwargs)
         append_jsonl(self._index_path(run_id), artifact)
         return artifact
 
@@ -145,6 +158,7 @@ class ArtifactService:
         mime_type: str = "application/octet-stream",
         summary: str = "",
         metadata: dict[str, Any] | None = None,
+        artifact_id: str | None = None,
     ) -> Artifact:
         """Регистрирует локальный файл как artifact с расчетом checksum.
 
@@ -172,6 +186,7 @@ class ArtifactService:
             summary=summary,
             checksum=hashlib.sha256(payload).hexdigest(),
             metadata=metadata,
+            artifact_id=artifact_id,
         )
 
     def list_artifacts(self, run_id: str) -> list[Artifact]:
@@ -298,6 +313,35 @@ class ArtifactService:
                 )
             )
         return registered
+
+    def _resolve_unique_artifact_id(
+        self,
+        run_id: str,
+        artifact_id: str | None,
+    ) -> str | None:
+        """Гарантирует уникальность пользовательского artifact_id внутри запуска.
+
+        Args:
+            run_id: Идентификатор ResearchRun.
+            artifact_id: Желаемый человеко-читаемый идентификатор или ``None``.
+
+        Returns:
+            Свободный идентификатор: исходный, либо с числовым суффиксом при коллизии.
+            Возвращает ``None``, если пользователь не передал artifact_id (тогда сработает
+            UUID из default_factory модели Artifact).
+        """
+
+        if not artifact_id:
+            return None
+        existing_ids = {artifact.artifact_id for artifact in self.list_artifacts(run_id)}
+        if artifact_id not in existing_ids:
+            return artifact_id
+        index = 2
+        while True:
+            candidate = f"{artifact_id}_{index}"
+            if candidate not in existing_ids:
+                return candidate
+            index += 1
 
     def _index_path(self, run_id: str) -> Path:
         """Возвращает путь к JSONL-индексу artifacts запуска.

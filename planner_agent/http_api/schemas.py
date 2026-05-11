@@ -12,8 +12,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from pydantic import BaseModel, Field
 
 from planner_agent.schemas.lineage import ResearchRun
@@ -73,7 +71,6 @@ class AgentInvokeRequest(BaseModel):
         user_id: Идентификатор пользователя.
         filesystem_context: Дополнительный контекст рабочих директорий и файлов.
         context_runs: Необязательные прошлые ResearchRun для follow-up диалога.
-        configurable: Дополнительные параметры интеграции в стиле RunnableConfig.
 
     Returns:
         Валидированный запрос запуска агента.
@@ -89,10 +86,6 @@ class AgentInvokeRequest(BaseModel):
     context_runs: list[ContextRunRef] = Field(
         default_factory=list,
         description="Существующие runs, доступные follow-up запуску.",
-    )
-    configurable: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Дополнительные параметры интеграции.",
     )
 
 

@@ -20,7 +20,7 @@ import json
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import aiofiles
 import pandas as pd
@@ -471,13 +471,14 @@ def build_workspace_tools(
     async def replace_current_dataframe(
             dataframe_file: str,
             variable_name: str = DEFAULT_CURRENT_DF_VAR,
-    ) -> str:
+    ) -> Union[pd.DataFrame, str]:
         """
         Используйте этот инструмент, когда вы хотите заменить текущий
         dataframe (df_current) на dataframe из runtime-памяти агента (рабочей директории).
 
-        Загружает набор данных по названию файла и заменяет активный
-        dataframe в памяти.
+        Загружает набор данных по названию файла, заменяет активный dataframe
+        в памяти и возвращает DataFrame. Artifact wrapper сохранит DataFrame
+        как dataset artifact, а модели передаст только его структуру.
         """
         path = _resolve_path(runtime, dataframe_file, base_dir=runtime.workspace_root)
         if not path.exists() or not path.is_file():
@@ -488,10 +489,7 @@ def build_workspace_tools(
         runtime.current_dataframe = variable_name
         runtime.sandbox.last_dataframe_variable = variable_name
 
-        return (
-            f"Dataframe '{path.name}' загружен в переменную '{variable_name}'. Он находится в вирутальном окружении"
-            f"Размерность={df.shape}. Названия колонок={list(df.columns)}"
-        )
+        return df
 
     @tool("list_loaded_dataframes_in_virtual_environment")
     async def list_loaded_dataframes_in_virtual_environment() -> str:
@@ -688,9 +686,7 @@ load_additional_context
     async def load_additional_source_database_table(
             source_file: str,
             variable_name: str = DEFAULT_ADDITIONAL_DF_VAR,
-            preview: bool = True,
-            rows: int = 5,
-    ) -> str:
+    ) -> Union[pd.DataFrame, str]:
         """
         Используйте этот инструмент только когда вам необходимо загрузить
         информацию из доступного дополнительного источника данных (базы данных, таблицы)
@@ -698,10 +694,6 @@ load_additional_context
         Args:
             source_file:   Имя файла источника данных.
             variable_name: Имя переменной для сохранения в sandbox.
-            preview:       При True — показывает первые строки без загрузки
-                           в память. При False — загружает полный набор данных
-                           в виртуальное окружение.
-            rows:          Количество строк для предпросмотра.
         """
         path = _resolve_path(runtime, source_file, base_dir=runtime.sources_dir)
         if not path.exists() or not path.is_file():
@@ -709,32 +701,10 @@ load_additional_context
 
         df = _load_dataframe(path)
 
-        if preview:
-            rows = max(1, min(rows, MAX_PREVIEW_ROWS_SOURCE))
-            columns = (
-                ", ".join(df.columns.astype(str).tolist())
-                if len(df.columns)
-                else "<no columns>"
-            )
-            dtypes = ", ".join(
-                f"{name}:{dtype}" for name, dtype in df.dtypes.items()
-            )
-            table_preview = df.head(rows).to_string(index=False)
-            return (
-		f"Превью файла: {path.name}\n"
-                f"Размерность: {df.shape}\n"
-                f"Колонки: {columns}\n"
-                f"Типы данных в колонках: {dtypes}\n"
-                f"Строки: {rows}\n"
-                f"Превью:\n{table_preview}"
- 		f"Для загрузки источника в переменную вирутального окружения вызовите этот инструмент (load_additional_source) с параметром preview=False "
-            )
-
         await runtime.sandbox.add_variable(variable_name, df)
-        return (
-            f"Dataframe загружен полностью из '{source_file}' в переменную '{variable_name}'. Она находится в вирутальном окружении "
-            f"Размерность набора данных в вирутальном окружении={df.shape}. Колонки={list(df.columns)}"
-        )
+        runtime.current_dataframe = variable_name
+        runtime.sandbox.last_dataframe_variable = variable_name
+        return df
 
     tools = [
         get_list_files_from_root_directory,

@@ -118,24 +118,6 @@ class ApiFakeGraph:
 class UiApiTests(unittest.TestCase):
     """Проверяет минимальные HTTP endpoints для будущего UI."""
 
-    def test_serves_static_analyst_ui(self) -> None:
-        """Проверяет, что FastAPI раздает статический интерфейс аналитика."""
-
-        with tempfile.TemporaryDirectory() as tmp:
-            lineage = LineageService(tmp)
-            artifacts = ArtifactService(tmp)
-            services = ApiServices(
-                lineage_service=lineage,
-                artifact_service=artifacts,
-                inspection_service=RunInspectionService(lineage, artifacts),
-            )
-            client = TestClient(create_app(services=services))
-
-            response = client.get("/app/")
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn("Research Agent", response.text)
-
     def test_reads_run_graph_node_inspector_and_artifacts(self) -> None:
         """Проверяет чтение runs, graph, Node Inspector и artifact preview через API."""
 

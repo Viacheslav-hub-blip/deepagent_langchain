@@ -32,7 +32,6 @@ from .services.skills_service import SkillsService
 from .toolkits.workspace_toolkit import build_workspace_tools
 from .tools.registry import ToolRegistry
 from .tools.skill_tools import build_skill_read_tools
-from .tools.spark_tools import build_spark_tools
 
 try:
     from sandbox.executor import BaseCodeExecutorTool
@@ -217,13 +216,6 @@ def planner_agent(
         for tool in build_skill_read_tools(final_skills_service)
         if tool.name not in existing_tool_names
     )
-    existing_tool_names = {tool.name for tool in final_worker_tools}
-    final_worker_tools.extend(
-        tool
-        for tool in build_spark_tools()
-        if tool.name not in existing_tool_names
-    )
-
     final_tool_registry = tool_registry or ToolRegistry()
     final_tool_registry.register_many(final_worker_tools)
     final_worker_tools = final_tool_registry.enabled(enabled_tool_names)

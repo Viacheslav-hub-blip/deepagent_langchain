@@ -7,7 +7,7 @@ base_code_executor_tool.py
     Содержит класс BaseCodeExecutorTool, который:
     - принимает MCP-инструмент и Python-песочницу;
     - преобразует JSON Schema MCP-инструмента в Pydantic-модель;
-    - генерирует код через MCP, выполняет его в песочнице и возвращает JSON-ответ;
+    - генерирует код через MCP, логирует его, выполняет в песочнице и возвращает JSON-ответ;
     - поддерживает контекст повторных попыток (предыдущий код и ошибка).
 """
 
@@ -53,6 +53,12 @@ _GROUNDED_CODE_CONTRACT: str = """
 - Если нужных данных нет в schema_context, тексте задачи, переменных или artifact/file path, код должен записать в target_variable диагностический результат с описанием недостающих входов, а не имитировать данные.
 - Итоговая переменная должна содержать не только числа, но и краткое описание использованных входов: имена переменных, artifact/file path или другой источник, который реально использовался кодом.
 """
+
+# Заголовок диагностического блока с кодом, отправленным в песочницу.
+_SANDBOX_CODE_LOG_TITLE: str = "[sandbox-code]"
+
+# Заголовок диагностического блока с ошибкой выполнения кода.
+_SANDBOX_ERROR_LOG_TITLE: str = "[sandbox-error]"
 
 
 class BaseCodeExecutorTool(BaseTool):
@@ -221,7 +227,12 @@ class BaseCodeExecutorTool(BaseTool):
             return self._make_error_response("Не удалось получить код от MCP")
 
         target_variable: str = kwargs.get("target_variable", "result")
+        self._log_generated_code(
+            code=generated_code,
+            target_variable=target_variable,
+        )
         result = await self.sandbox.execute(generated_code, target_variable=target_variable)
+        self._log_execution_error(result)
 
         # Сохраняем имя последней успешно заполненной переменной в песочнице
         if result.success:
@@ -442,6 +453,7 @@ class BaseCodeExecutorTool(BaseTool):
             "target_variable": target_var,
             "execution_time_ms": result.execution_time_ms,
             "new_variables": result.new_variable_schemas,
+            "execution_output": result.output,
         }
 
         if result.success:
@@ -456,6 +468,43 @@ class BaseCodeExecutorTool(BaseTool):
         self._error_context = result.error
 
         return json.dumps(response, ensure_ascii=False)
+
+    def _log_generated_code(self, *, code: str, target_variable: str) -> None:
+        """
+        Выводит в stdout сгенерированный код перед выполнением в песочнице.
+
+        Args:
+            code: Python-код, полученный от MCP-инструмента.
+            target_variable: Имя целевой переменной, которую должен создать код.
+
+        Returns:
+            ``None``. Метод выполняет только диагностический вывод.
+        """
+
+        print(
+            f"{_SANDBOX_CODE_LOG_TITLE} tool={self.name} target_variable={target_variable}\n"
+            f"{code}",
+            flush=True,
+        )
+
+    def _log_execution_error(self, result: ExecutionResult) -> None:
+        """
+        Выводит в stdout ошибку выполнения кода, если sandbox вернул неуспешный результат.
+
+        Args:
+            result: Результат выполнения кода в песочнице.
+
+        Returns:
+            ``None``. Метод ничего не печатает при успешном выполнении.
+        """
+
+        if result.success:
+            return
+        error_text = result.error or "Sandbox execution failed without error text."
+        print(
+            f"{_SANDBOX_ERROR_LOG_TITLE} tool={self.name}\n{error_text}",
+            flush=True,
+        )
 
     @staticmethod
     def _make_error_response(message: str) -> str:

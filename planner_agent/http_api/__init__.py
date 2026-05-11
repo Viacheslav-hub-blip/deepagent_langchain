@@ -1,8 +1,7 @@
 """Опциональный HTTP-слой (FastAPI) поверх ResearchAgent и RunInspectionService.
 
-Требует зависимостей ``[api]`` из pyproject (fastapi, uvicorn). Не включает
-фронтенд: при наличии локальной папки ``ui/analyst_ui`` она может быть
-подключена как статика (см. ``create_app``).
+Требует зависимостей ``[api]`` из pyproject (fastapi, uvicorn). Модуль отдает
+только SDK/API endpoints и не монтирует frontend-статику.
 """
 
 from __future__ import annotations

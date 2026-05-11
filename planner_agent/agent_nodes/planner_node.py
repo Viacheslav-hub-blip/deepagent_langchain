@@ -34,7 +34,7 @@ GOTO_SCHEDULER: str = "scheduler"
 GOTO_RESPONDER: str = "responder"
 
 #: Максимальная длина превью результата / обоснования / лога ошибки.
-PREVIEW_MAX_LENGTH: int = 300
+PREVIEW_MAX_LENGTH: int = 800
 
 #: Максимальная длина блока, который выводится в терминал.
 CONSOLE_BLOCK_MAX_LENGTH: int = 8_000
@@ -268,6 +268,21 @@ def _task_to_summary_line(task_id: str, task: Task) -> str:
     return " | ".join(parts)
 
 
+def _wrap_task_prompt_block(task_id: str, content: str) -> str:
+    """Оборачивает текст задачи в парный тег для prompt-контекста.
+
+    Args:
+        task_id: Идентификатор задачи, который будет добавлен в тег.
+        content: Текстовое описание блока задачи.
+
+    Returns:
+        Многострочная строка вида ``<TASK task_id>... </TASK task_id>``.
+    """
+
+    tag_id = str(task_id).strip() or "unknown"
+    return f"<TASK {tag_id}>\n{content.strip()}\n</TASK {tag_id}>"
+
+
 def _create_plan_summary(plan: dict[str, Task]) -> str:
     """Создаёт полную текстовую сводку плана из всех задач.
 
@@ -281,8 +296,9 @@ def _create_plan_summary(plan: dict[str, Task]) -> str:
     if not plan:
         return "Задач еще нет (план пустой)."
 
-    return "\n".join(
-        _task_to_summary_line(task_id, task) for task_id, task in plan.items()
+    return "\n\n".join(
+        _wrap_task_prompt_block(task_id, _task_to_summary_line(task_id, task))
+        for task_id, task in plan.items()
     )
 
 
@@ -584,7 +600,16 @@ def _format_candidate_plan(full_plan: FullPlan) -> str:
         JSON-строка с objective и задачами плана.
     """
 
-    return json.dumps(full_plan.model_dump(mode="json"), ensure_ascii=False, indent=2)
+    lines = [f"objective: {full_plan.objective or ''}"]
+    if not full_plan.tasks:
+        lines.append("tasks: []")
+        return "\n".join(lines)
+
+    for task in full_plan.tasks:
+        task_id = str(task.task_id).strip() or "unknown"
+        task_json = json.dumps(task.model_dump(mode="json"), ensure_ascii=False, indent=2)
+        lines.append(_wrap_task_prompt_block(task_id, task_json))
+    return "\n\n".join(lines)
 
 
 def _get_initial_user_query(state: AgentState) -> str:
@@ -616,6 +641,10 @@ def _format_execution_results(plan: dict[str, Task]) -> str:
     Для каждой задачи показывает конфигурацию, превью результата,
     результат валидации и лог ошибки (при наличии).
 
+    Превью для планировщика/replanner берётся как ``full_result`` (финальный
+    текст ответа модели worker), иначе ``result_preview`` (например сырой вывод
+    инструмента, если модель не вернула отдельного текста).
+
     Args:
         plan: Словарь задач планировщика.
 
@@ -637,14 +666,15 @@ def _format_execution_results(plan: dict[str, Task]) -> str:
             f" | Описание={task.description}"
         )
 
-        if task.result_preview:
+        display_preview = (task.full_result or task.result_preview or "").strip()
+        if display_preview:
             # Ограничиваем превью константой для единообразия
             line += (
                 f" | Превью результата (первые {PREVIEW_MAX_LENGTH} символов)"
-                f"={task.result_preview[:PREVIEW_MAX_LENGTH]}"
+                f"={display_preview[:PREVIEW_MAX_LENGTH]}"
             )
 
-        lines.append(line)
+        lines.append(_wrap_task_prompt_block(task_id, line))
 
     if not lines:
         return "Завершённых задач с результатами пока нет."
@@ -1055,7 +1085,6 @@ async def planner_node(
 
     # Подготавливаем все части системного промпта
     plan_str = _create_plan_summary(current_plan)
-    initial_plan_str = _create_plan_summary(state.initial_plan or {})
     initial_user_query = _get_initial_user_query(state)
     execution_results = _format_execution_results(current_plan)
     df_info = _format_data_context(state)
@@ -1081,7 +1110,6 @@ async def planner_node(
     schema_str = json.dumps(FullPlan.model_json_schema(), ensure_ascii=False, indent=2)
     system_prompt = prompt.format(
         plan_str=plan_str,
-        initial_plan_str=initial_plan_str,
         initial_user_query=initial_user_query,
         execution_results=execution_results,
         df_info=df_info,

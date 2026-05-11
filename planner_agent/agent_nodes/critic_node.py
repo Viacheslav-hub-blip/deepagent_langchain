@@ -391,19 +391,35 @@ def _format_plan_for_critic(plan: dict[str, Task]) -> str:
 
     lines: list[str] = []
     for task_id, task in plan.items():
-        lines.append(
-            (
-                f"- {task_id}: status={task.status.value}; "
-                f"deps={task.dependencies}; tools={task.suggested_tools}; "
-                f"skills={task.suggested_skills}; description={task.description}; "
-                f"result_preview={(task.result_preview or '')[:MAX_TEXT_PREVIEW]}; "
-                f"full_result={(task.full_result or '')[:MAX_TEXT_PREVIEW]}; "
-                f"validation={task.validation_passed}; "
-                f"validation_reason={(task.validation_reason or '')[:MAX_TEXT_PREVIEW]}; "
-                f"error={(task.error_log or '')[:MAX_TEXT_PREVIEW]}"
-            )
+        content = (
+            f"task_id={task_id}; status={task.status.value}; "
+            f"deps={task.dependencies}; tools={task.suggested_tools}; "
+            f"skills={task.suggested_skills}; description={task.description}; "
+            f"result_preview={(task.result_preview or '')[:MAX_TEXT_PREVIEW]}; "
+            f"full_result={(task.full_result or '')[:MAX_TEXT_PREVIEW]}; "
+            f"validation={task.validation_passed}; "
+            f"validation_reason={(task.validation_reason or '')[:MAX_TEXT_PREVIEW]}; "
+            f"error={(task.error_log or '')[:MAX_TEXT_PREVIEW]}"
         )
+        lines.append(_wrap_critic_prompt_block("TASK", task_id, content))
     return "\n".join(lines)
+
+
+def _wrap_critic_prompt_block(kind: str, block_id: str, content: str) -> str:
+    """РћР±РѕСЂР°С‡РёРІР°РµС‚ Р±Р»РѕРє critic prompt РІ РїР°СЂРЅС‹Рµ С‚РµРіРё.
+
+    Args:
+        kind: РўРёРї Р±Р»РѕРєР° РґР»СЏ С‚РµРіР°, РЅР°РїСЂРёРјРµСЂ ``TASK`` РёР»Рё ``ARTIFACT``.
+        block_id: РРґРµРЅС‚РёС„РёРєР°С‚РѕСЂ Р±Р»РѕРєР°.
+        content: РўРµРєСЃС‚РѕРІРѕРµ СЃРѕРґРµСЂР¶РёРјРѕРµ Р±Р»РѕРєР°.
+
+    Returns:
+        РњРЅРѕРіРѕСЃС‚СЂРѕС‡РЅР°СЏ СЃС‚СЂРѕРєР° СЃ РѕС‚РєСЂС‹РІР°СЋС‰РёРј Рё Р·Р°РєСЂС‹РІР°СЋС‰РёРј С‚РµРіРѕРј.
+    """
+
+    tag_kind = str(kind).strip().upper() or "BLOCK"
+    tag_id = str(block_id).strip() or "unknown"
+    return f"<{tag_kind} {tag_id}>\n{content.strip()}\n</{tag_kind} {tag_id}>"
 
 
 def _format_react_message_tool_calls_for_critic(
@@ -521,14 +537,13 @@ def _format_artifacts_for_critic(artifact_index: dict[str, Any]) -> str:
         metadata = artifact.get("metadata")
         if not isinstance(metadata, dict):
             metadata = {}
-        lines.append(
-            (
-                f"- artifact_id={artifact_id}; kind={artifact.get('kind')}; "
-                f"uri={artifact.get('uri')}; task_id={metadata.get('task_id')}; "
-                f"tool_name={metadata.get('tool_name')}; "
-                f"summary={str(artifact.get('summary') or '')[:MAX_TEXT_PREVIEW]}"
-            )
+        content = (
+            f"artifact_id={artifact_id}; kind={artifact.get('kind')}; "
+            f"uri={artifact.get('uri')}; task_id={metadata.get('task_id')}; "
+            f"tool_name={metadata.get('tool_name')}; "
+            f"summary={str(artifact.get('summary') or '')[:MAX_TEXT_PREVIEW]}"
         )
+        lines.append(_wrap_critic_prompt_block("ARTIFACT", artifact_id, content))
     return "\n".join(lines)
 
 

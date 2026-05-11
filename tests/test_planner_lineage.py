@@ -56,7 +56,7 @@ class PlannerLineageTests(unittest.TestCase):
                     state=state,
                     llm=llm,
                     tools=[],
-                    prompt="{plan_str}\n{initial_plan_str}\n{initial_user_query}\n"
+                    prompt="{plan_str}\n{initial_user_query}\n"
                     "{execution_results}\n{df_info}\n{tools_desc}\n"
                     "{previous_context}\n{schema_str}",
                     lineage_service=lineage,
@@ -128,7 +128,7 @@ class PlannerLineageTests(unittest.TestCase):
                     state=state,
                     llm=llm,
                     tools=[],
-                    prompt="{plan_str}\n{initial_plan_str}\n{initial_user_query}\n"
+                    prompt="{plan_str}\n{initial_user_query}\n"
                     "{execution_results}\n{df_info}\n{tools_desc}\n"
                     "{previous_context}\n{critic_feedback}\n{schema_str}",
                     lineage_service=lineage,

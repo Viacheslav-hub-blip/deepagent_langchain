@@ -12,6 +12,7 @@
 - _capture_generated_artifact: сохранение большого результата как нового artifact.
 - _looks_like_existing_file: проверка строки на путь к файлу.
 - _result_kind_and_mime: определение типа artifact.
+- _build_variable_name: формирование имени sandbox-переменной для DataFrame artifact.
 - _safe_filename_fragment: безопасный фрагмент имени файла.
 """
 
@@ -80,6 +81,7 @@ def capture_tool_result(
         raw_result: Any,
         capture_id: str = "",
         max_inline_chars: int = MAX_INLINE_TOOL_RESULT_CHARS,
+        artifact_label: str | None = None,
 ) -> CapturedToolResult:
     """Перехватывает результат tool и сохраняет большой output как artifact.
 
@@ -93,6 +95,9 @@ def capture_tool_result(
         raw_result: Сырой результат, возвращенный tool.
         capture_id: Опциональный идентификатор вызова для уникального имени artifact.
         max_inline_chars: Порог размера, выше которого результат сохраняется как artifact.
+        artifact_label: Опциональный человеко-читаемый идентификатор для созданного
+            artifact (например, ``t5_spark_get_cards_events_1``). При коллизии в
+            рамках запуска к нему добавляется числовой суффикс.
 
     Returns:
         CapturedToolResult с безопасным значением для LLM и artifact refs.
@@ -108,6 +113,7 @@ def capture_tool_result(
         tool_name=tool_name,
         tool_input=tool_input,
         raw_result=raw_result,
+        artifact_label=artifact_label,
     )
     if existing_file is not None:
         return _captured_result_from_artifact(
@@ -130,6 +136,7 @@ def capture_tool_result(
             preview=preview,
             size_estimate=size_estimate,
             capture_id=capture_id,
+            artifact_label=artifact_label,
         )
         if inline_artifact is not None:
             return _inline_result_with_artifact(
@@ -159,6 +166,7 @@ def capture_tool_result(
         size_estimate=size_estimate,
         capture_id=capture_id,
         capture_reason="context_budget_exceeded",
+        artifact_label=artifact_label,
     )
     return _captured_result_from_artifact(
         artifact=artifact,
@@ -232,9 +240,17 @@ def format_artifact_reference(
         Текстовое сообщение, которое можно безопасно передать в LLM context.
     """
 
+    result_meta = _build_result_metadata(raw_result)
+    if _is_dataframe(raw_result):
+        return _format_dataframe_artifact_reference(
+            artifact=artifact,
+            original_size_estimate=original_size_estimate,
+            result_meta=result_meta,
+            reason=reason,
+        )
+
     preview_is_truncated = "[truncated]" in preview
     preview_line = _single_line_preview(preview)
-    result_meta = _build_result_metadata(raw_result)
     return (
         "Tool result was saved as an artifact because it is too large for the "
         "worker context.\n\n"
@@ -271,7 +287,9 @@ def serialize_tool_result(value: Any, *, max_chars: int | None = None) -> str:
         Текстовое представление результата.
     """
 
-    if isinstance(value, str):
+    if _is_dataframe(value):
+        text = json.dumps(_build_result_metadata(value), ensure_ascii=False, indent=2)
+    elif isinstance(value, str):
         text = value
     elif isinstance(value, bytes):
         text = f"<bytes length={len(value)}>"
@@ -314,6 +332,7 @@ def _capture_existing_file(
         tool_name: str,
         tool_input: Any,
         raw_result: Any,
+        artifact_label: str | None = None,
 ) -> Artifact | None:
     """Регистрирует существующий файл, если tool вернул путь.
 
@@ -325,6 +344,7 @@ def _capture_existing_file(
         tool_name: Имя tool.
         tool_input: Аргументы tool.
         raw_result: Сырой результат tool.
+        artifact_label: Опциональный человеко-читаемый id для нового artifact.
 
     Returns:
         Artifact для найденного файла или ``None``.
@@ -351,6 +371,7 @@ def _capture_existing_file(
             "reusable": True,
             "editable": True,
         },
+        artifact_id=artifact_label,
     )
 
 
@@ -367,6 +388,7 @@ def _capture_generated_artifact(
         size_estimate: int,
         capture_id: str,
         capture_reason: str,
+        artifact_label: str | None = None,
 ) -> Artifact:
     """Сохраняет большой результат tool как новый artifact.
 
@@ -391,6 +413,8 @@ def _capture_generated_artifact(
     safe_tool_name = _safe_filename_fragment(tool_name)
     safe_task_id = _safe_filename_fragment(task_id or "unknown_task")
     safe_capture_id = _safe_filename_fragment(capture_id or "result")
+    result_metadata = _build_result_metadata(raw_result)
+    variable_name = _build_variable_name(artifact_label or safe_tool_name)
     if isinstance(raw_result, bytes):
         content: str | bytes = raw_result
     elif _is_dataframe(raw_result):
@@ -398,6 +422,7 @@ def _capture_generated_artifact(
         mime_type = "text/csv"
         extension = "csv"
         kind = "dataset"
+        preview = _dataframe_summary(result_metadata)
     else:
         content = serialize_tool_result(raw_result, max_chars=None)
 
@@ -420,9 +445,18 @@ def _capture_generated_artifact(
             "capture_reason": capture_reason,
             "original_size_estimate": size_estimate,
             "max_inline_chars": MAX_INLINE_TOOL_RESULT_CHARS,
+            "row_count": result_metadata["row_count"],
+            "columns": result_metadata["columns"],
+            "column_types": result_metadata["column_types"],
+            "has_empty_values": result_metadata["has_empty_values"],
+            "has_empty_values_by_column": result_metadata["has_empty_values_by_column"],
+            "empty_value_counts_by_column": result_metadata["empty_value_counts_by_column"],
+            "variable_name": variable_name if _is_dataframe(raw_result) else "",
+            "sandbox_variable_name": variable_name if _is_dataframe(raw_result) else "",
             "reusable": True,
             "editable": True,
         },
+        artifact_id=artifact_label,
     )
 
 
@@ -438,6 +472,7 @@ def _capture_inline_structured_result(
         preview: str,
         size_estimate: int,
         capture_id: str,
+        artifact_label: str | None = None,
 ) -> Artifact | None:
     """Регистрирует маленький структурированный tool result как reusable artifact.
 
@@ -473,6 +508,7 @@ def _capture_inline_structured_result(
         size_estimate=size_estimate,
         capture_id=capture_id,
         capture_reason="inline_structured_result",
+        artifact_label=artifact_label,
     )
 
 
@@ -684,23 +720,34 @@ def _build_result_metadata(raw_result: Any) -> dict[str, Any]:
 
     if _is_dataframe(raw_result):
         try:
-            dtypes = {
-                str(column): str(dtype)
-                for column, dtype in raw_result.dtypes.items()
-            }
-            has_nan = {
-                str(column): bool(raw_result[column].isna().any())
+            columns = [str(column) for column in raw_result.columns]
+            dtypes = {str(column): str(dtype) for column, dtype in raw_result.dtypes.items()}
+            empty_counts = {
+                str(column): int(raw_result[column].isna().sum())
                 for column in raw_result.columns
+            }
+            has_empty_values_by_column = {
+                column: count > 0 for column, count in empty_counts.items()
             }
             return {
                 "row_count": int(getattr(raw_result, "shape", [0])[0]),
+                "column_count": int(getattr(raw_result, "shape", [0, 0])[1]),
+                "columns": columns,
                 "column_types": dtypes,
-                "has_nan_by_column": has_nan,
+                "has_empty_values": any(has_empty_values_by_column.values()),
+                "has_empty_values_by_column": has_empty_values_by_column,
+                "empty_value_counts_by_column": empty_counts,
+                "has_nan_by_column": has_empty_values_by_column,
             }
         except Exception:
             return {
                 "row_count": 0,
+                "column_count": 0,
+                "columns": [],
                 "column_types": {},
+                "has_empty_values": False,
+                "has_empty_values_by_column": {},
+                "empty_value_counts_by_column": {},
                 "has_nan_by_column": {},
             }
 
@@ -708,23 +755,116 @@ def _build_result_metadata(raw_result: Any) -> dict[str, Any]:
     if not records:
         return {
             "row_count": 0,
+            "column_count": 0,
+            "columns": [],
             "column_types": {},
+            "has_empty_values": False,
+            "has_empty_values_by_column": {},
+            "empty_value_counts_by_column": {},
             "has_nan_by_column": {},
         }
 
     columns = sorted({str(key) for record in records for key in record.keys()})
     column_types: dict[str, str] = {}
-    has_nan_by_column: dict[str, bool] = {}
+    has_empty_values_by_column: dict[str, bool] = {}
+    empty_value_counts_by_column: dict[str, int] = {}
     for column in columns:
         values = [record.get(column) for record in records]
         non_empty = [value for value in values if not _is_nan_like(value)]
         column_types[column] = _infer_column_type(non_empty)
-        has_nan_by_column[column] = any(_is_nan_like(value) for value in values)
+        empty_count = sum(1 for value in values if _is_nan_like(value))
+        empty_value_counts_by_column[column] = empty_count
+        has_empty_values_by_column[column] = empty_count > 0
     return {
         "row_count": len(records),
+        "column_count": len(columns),
+        "columns": columns,
         "column_types": column_types,
-        "has_nan_by_column": has_nan_by_column,
+        "has_empty_values": any(has_empty_values_by_column.values()),
+        "has_empty_values_by_column": has_empty_values_by_column,
+        "empty_value_counts_by_column": empty_value_counts_by_column,
+        "has_nan_by_column": has_empty_values_by_column,
     }
+
+
+def _format_dataframe_artifact_reference(
+        *,
+        artifact: Artifact,
+        original_size_estimate: int,
+        result_meta: dict[str, Any],
+        reason: str,
+) -> str:
+    """Формирует компактное описание DataFrame artifact без строк данных.
+
+    Args:
+        artifact: Artifact, в который сохранён DataFrame.
+        original_size_estimate: Оценка размера исходного DataFrame в символах.
+        result_meta: Метаданные DataFrame: строки, колонки, типы и пустые значения.
+        reason: Причина сохранения результата как artifact.
+
+    Returns:
+        Текст для LLM с идентификатором artifact и структурой DataFrame без sample.
+    """
+
+    return (
+        "DataFrame result was saved as an artifact.\n\n"
+        "data_scope: dataframe_metadata_only\n"
+        "full_result_available_in_artifact: true\n"
+        "worker_disclosure_required: false\n"
+        f"reason: {reason}\n"
+        f"artifact_id: {artifact.artifact_id}\n"
+        f"variable_name: {artifact.metadata.get('variable_name') or ''}\n"
+        f"sandbox_variable_name: {artifact.metadata.get('sandbox_variable_name') or ''}\n"
+        f"kind: {artifact.kind}\n"
+        f"uri: {artifact.uri}\n"
+        f"mime_type: {artifact.mime_type}\n"
+        f"original_size_estimate_chars: {original_size_estimate}\n"
+        f"row_count: {result_meta['row_count']}\n"
+        f"column_count: {result_meta['column_count']}\n"
+        f"columns: {serialize_tool_result(result_meta['columns'], max_chars=4_000)}\n"
+        f"column_types: {serialize_tool_result(result_meta['column_types'], max_chars=4_000)}\n"
+        f"has_empty_values: {str(result_meta['has_empty_values']).lower()}\n"
+        "has_empty_values_by_column: "
+        f"{serialize_tool_result(result_meta['has_empty_values_by_column'], max_chars=4_000)}\n"
+        "empty_value_counts_by_column: "
+        f"{serialize_tool_result(result_meta['empty_value_counts_by_column'], max_chars=4_000)}"
+    )
+
+
+def _build_variable_name(label: str) -> str:
+    """Преобразует artifact label в корректное имя Python-переменной.
+
+    Args:
+        label: Label artifact или имя tool.
+
+    Returns:
+        Безопасное имя переменной для sandbox.
+    """
+
+    safe = re.sub(r"\W+", "_", label).strip("_")
+    if not safe:
+        safe = "df_tool_result"
+    if safe[0].isdigit():
+        safe = f"df_{safe}"
+    return safe
+
+
+def _dataframe_summary(result_meta: dict[str, Any]) -> str:
+    """Создаёт краткое описание DataFrame для summary artifact без строк данных.
+
+    Args:
+        result_meta: Метаданные DataFrame.
+
+    Returns:
+        Однострочное описание размера и наличия пустых значений.
+    """
+
+    return (
+        "DataFrame artifact: "
+        f"rows={result_meta['row_count']}; "
+        f"columns={result_meta['column_count']}; "
+        f"has_empty_values={result_meta['has_empty_values']}"
+    )
 
 
 def _to_records(raw_result: Any) -> list[dict[str, Any]]:

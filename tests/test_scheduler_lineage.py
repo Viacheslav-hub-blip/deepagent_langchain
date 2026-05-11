@@ -227,6 +227,37 @@ class SchedulerLineageTests(unittest.TestCase):
             {"case-analysis": "Domain analysis skill preview."},
         )
 
+    def test_scheduler_redirects_blocked_plan_to_replanner(self) -> None:
+        """Проверяет переход к replanner при блокировке failed-зависимостью."""
+
+        state = AgentState(
+            plan={
+                "1": Task(
+                    task_id="1",
+                    description="Load trigger case",
+                    status=TaskStatus.FAILED,
+                    error_log="Tool failed",
+                ),
+                "2": Task(
+                    task_id="2",
+                    description="Extract trigger parameters",
+                    dependencies=["1"],
+                    status=TaskStatus.PENDING,
+                ),
+            },
+        )
+
+        command = run(scheduler_node(state))
+
+        self.assertEqual(command.goto, "replanner")
+        self.assertEqual(len(command.update["feedback_context"]), 1)
+        feedback = command.update["feedback_context"][0]
+        self.assertEqual(feedback["failed_task_diagnosis"][0]["task_id"], "2")
+        self.assertEqual(
+            feedback["failed_task_diagnosis"][0]["blocked_by"],
+            [{"task_id": "1", "status": "failed"}],
+        )
+
     def test_collect_ancestor_data_uses_full_result_when_available(self) -> None:
         """Проверяет, что в контекст предков попадает полный результат задачи."""
 

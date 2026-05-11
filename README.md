@@ -1,6 +1,6 @@
 # AnaliticAgenticPlatform
 
-`AnaliticAgenticPlatform` — planner-first аналитический агент на LangGraph и LangChain. Публичная часть репозитория — **SDK** (`planner_agent`, песочница `sandbox`, примеры): LangChain `Runnable`, сохранение `ResearchRun` (план, lineage, snapshots, tools, artifacts, validation, critic, финальный отчёт). Отдельный тяжёлый фронтенд в репозиторий не входит; опционально монтируется статика `ui/analyst_ui`, если папка есть локально.
+`AnaliticAgenticPlatform` — planner-first аналитический агент на LangGraph и LangChain. Пакет `planner_agent` является самостоятельным **SDK**: LangChain `Runnable`, сохранение `ResearchRun` (план, lineage, snapshots, tools, artifacts, validation, critic, финальный отчёт), read API и опциональный FastAPI-слой без привязки к UI.
 
 Типичный сценарий: короткий запрос пользователя → план → выгрузки через ваши tools → при необходимости код в sandbox → валидация шагов → итоговый markdown через `responder_node`.
 
@@ -65,7 +65,7 @@ scheduler -> worker -> critic <-> worker (до 2 ретраев critic) -> valid
 
 ### 1. LangChain вход
 
-Пользователь или UI вызывает `ResearchAgent` как обычный `Runnable`:
+Пользовательский код или внешний сервис вызывает `ResearchAgent` как обычный `Runnable`:
 
 ```python
 messages = agent.invoke(
@@ -74,7 +74,7 @@ messages = agent.invoke(
 )
 ```
 
-`ResearchAgent` нормализует вход в `AgentState`: строку, `dict`, `list[BaseMessage]`, `ResearchAgentInput` или готовый `AgentState`.
+`ResearchAgent` нормализует вход в `AgentState`: строку, `dict`, `ResearchAgentInput` или готовый `AgentState`.
 
 ### 2. Initializer
 
@@ -172,6 +172,8 @@ Reviewer помечает план как проблемный, если:
 - все dependencies должны быть `completed`;
 - failed dependency не считается надежным входом;
 - независимые задачи отправляются параллельно.
+
+Если `pending`/`ready` задача заблокирована `failed`, `skipped` или отсутствующей зависимостью, scheduler не завершает run как "нет исполнимых задач". Он формирует `feedback_context` с диагностикой блокировки и отправляет управление в `replanner`, чтобы тот создал replacement/retry-задачу или переподключил downstream-зависимости.
 
 Для каждого worker собирается `WorkerPayload`: task, context schemas, previous results, resolved inputs, dependency context, filesystem context, skill previews и artifact context.
 
@@ -403,7 +405,7 @@ python -m unittest discover -s tests
 | `python main_deepseek_test.py` | Smoke с реальной моделью из `model.py`, fake Spark tools, `SmokeSandbox` (dataframe в памяти). |
 | `python main_sandbox_code_example.py` | Демо `ClientPythonSandbox` + обёртка `generate_python_code`, данные из CSV. |
 | `python main_e2e_branch_dialog.py` | Полный сценарий: базовый run → `invoke_branch` → follow-up с историей. |
-| `python main_mvp_e2e_check.py` | MVP без LLM: детерминированный graph, проверки invoke/messages/branch/dialog **и** HTTP client. |
+| `python main_mvp_e2e_check.py` | MVP без LLM: детерминированный graph, проверки invoke/branch/dialog **и** HTTP client. |
 | `python main_ui_agent_server.py` | Поднимает FastAPI с реальным `ResearchAgent` (fake Spark + MCP code tools на `127.0.0.1:8201`). |
 | `python examples/branch_from_graph_step_demo.py` | Проверка `LineageService.branch_from` для произвольного шага графа (без UI). |
 
@@ -416,7 +418,7 @@ python -m unittest discover -s tests
 Основные методы (префикс по умолчанию `/api/v1`, задаётся `ApiSettings.api_prefix`):
 
 - `GET {prefix}/health`
-- `POST {prefix}/runs/invoke` — тело `AgentInvokeRequest`: `user_query`, `session_id`, `user_id`, `filesystem_context`, `context_runs`, `configurable`.
+- `POST {prefix}/runs/invoke` — тело `AgentInvokeRequest`: `user_query`, `session_id`, `user_id`, `filesystem_context`, `context_runs`.
 - `POST {prefix}/runs/live` — фоновый запуск: сразу возвращает `run_id`, далее опрос `GET {prefix}/runs/{run_id}/graph`.
 - `GET {prefix}/runs`, `GET {prefix}/runs/{run_id}`, `.../result`, `.../graph`, `.../nodes`, `.../nodes/{node_id}`, `.../inspector`, `.../artifacts`, preview/text/file артефактов.
 - `POST {prefix}/branches` — создать метаданные ветки; `POST {prefix}/branches/invoke` — создать и сразу выполнить (`BranchRequest`).
@@ -431,7 +433,7 @@ python -m unittest discover -s tests
 python -m uvicorn main_ui_agent_server:create_app_with_agent --factory --host 127.0.0.1 --port 8000
 ```
 
-Если локально существует каталог `ui/analyst_ui`, его можно смонтировать как статику по префиксу `/app` (логика в `create_app`). Сам React/Vite-проект в выкладку SDK не входит.
+HTTP-слой не монтирует frontend-статику. UI можно держать отдельным приложением, которое обращается к этим endpoints.
 
 ### Вспомогательный запуск без фасада
 
@@ -477,9 +479,9 @@ python -m uvicorn main_ui_agent_server:create_app_with_agent --factory --host 12
 - `batch(inputs, config=..., **kwargs)` / `abatch(...)` — список независимых запросов; `config` может быть одним или списком по длине `inputs`.
 - `stream(input, ...)` / `astream(...)` — обёртка: один chunk с **полным** результатом после завершения графа (как у `invoke`).
 
-**Допустимые формы `input`:** `str`, `dict` (валидируется как `ResearchAgentInput`), `list[BaseMessage]`, готовый `AgentState`, сам `ResearchAgentInput`.
+**Допустимые формы `input`:** `str`, `dict` (валидируется как `ResearchAgentInput`), готовый `AgentState`, сам `ResearchAgentInput`.
 
-**Ключи dict:** помимо полей `ResearchAgentInput`, поддерживаются алиасы `query` и `input` → `user_query`. Списки сообщений могут содержать dict с `role`/`type` и `content` (см. `_coerce_messages`).
+**Ключи dict:** используются только поля `ResearchAgentInput`, например `user_query`, `session_id`, `user_id`, `filesystem_context`, `context_runs` и `state`.
 
 **`kwargs` для `invoke`/`ainvoke`:** извлекаются только `user_query`, `session_id`, `user_id`, `filesystem_context`; остальные ключи **игнорируются** (не передаются в граф).
 
@@ -531,24 +533,7 @@ messages = agent.invoke(
         "user_query": "Проверь, является ли операция клиента обычной",
         "session_id": "analyst-session-001",
         "user_id": "analyst-42",
-        "metadata": {"source": "ui"},
     },
-    config={"recursion_limit": 60},
-)
-```
-
-### Вход через LangChain messages
-
-```python
-from langchain_core.messages import HumanMessage
-
-
-messages = agent.invoke(
-    [
-        HumanMessage(
-            content="Разбери сработку event_id=evt-c42-2025-01-03-block-001"
-        )
-    ],
     config={"recursion_limit": 60},
 )
 ```
@@ -673,7 +658,7 @@ AnaliticAgenticPlatform/
 
 Отвечает за совместимость с LangChain:
 
-- принимает `str`, `dict`, `list[BaseMessage]`, `ResearchAgentInput`, `AgentState`;
+- принимает `str`, `dict`, `ResearchAgentInput`, `AgentState`;
 - реализует `invoke`, `ainvoke`, `batch`, `abatch`, `stream`, `astream`;
 - возвращает `list[BaseMessage]`;
 - хранит `last_state` и `last_run_id`;
@@ -1413,15 +1398,31 @@ async def spark_get_trigger_case_by_event_id(event_id: str) -> dict:
 
 ## Artifact lifecycle
 
-Если tool вернул большой результат:
+Если tool вернул большой результат или ссылку на файл:
 
 1. `artifact_wrappers.py` передает результат в capture layer.
 2. `tool_result_capture.py` оценивает размер.
-3. Большой payload сохраняется как artifact.
-4. Worker получает краткий inline-result с `artifact_id` и `uri`.
+3. Большой payload сохраняется как artifact с человекочитаемым id вида `t{task_id}_{tool_name}_{n}`; при ретрае добавляется `r{retry_count}`.
+4. Worker получает краткий inline-result с `artifact_id`, `uri`, причиной capture и структурными metadata.
 5. Следующие worker-задачи получают artifact в `artifact_context`.
 6. Worker может читать artifact через runtime tools.
 7. Responder читает релевантные artifacts напрямую и включает содержимое в финальный prompt.
+
+Для DataFrame-результатов действует отдельный контракт:
+
+- строки данных не передаются модели inline;
+- artifact получает `row_count`, `column_count`, `columns`, `column_types`, признаки пустых значений и имя sandbox-переменной;
+- wrapper добавляет DataFrame в sandbox и возвращает модели `variable_name` / `sandbox_variable_name`;
+- workspace tools `load_dataframe_from_workspace` и `load_additional_source` возвращают DataFrame, чтобы wrapper сохранил его как dataset artifact и передал модели только структуру;
+- preview sandbox-переменных больше не включает первую строку DataFrame, чтобы не протаскивать данные в prompt без необходимости.
+
+`task.artifact_refs` теперь содержит только значимые входы для дальнейшего анализа: большие captured results и ссылки на существующие файлы. Служебные `tool_trace`, вызовы `artifact_*` / `skill_*`, code trace и маленькие inline structured results остаются в общем `artifact_index`, но не засоряют контекст задач.
+
+Вызовы tools сохраняются отдельно:
+
+- каждый wrapped tool пишет trace artifact с аргументами, capture reason и ссылками на созданные artifacts;
+- worker/responder сохраняют tool-calls trace, чтобы можно было восстановить, какие инструменты реально вызывались и какие preview вернулись;
+- responder также сохраняет `final_report_context.md`, где виден стартовый пакет данных для финального отчета.
 
 Типичные artifact kinds:
 
@@ -1547,8 +1548,10 @@ messages = agent.invoke(
 - worker не возвращает только план действий, если задача требует результата;
 - worker получает previews skills, autoload по `suggested_skills`, runtime tools `skill_list` / `skill_view` и блок **`<available_python_packages>`** из `sandbox.get_installed_packages()`;
 - source/export tools используются для загрузки данных;
+- DataFrame-результаты source/workspace tools сохраняются как artifacts и sandbox-переменные, а в prompt попадают metadata без строк данных;
 - code generator используется для расчетов по уже доступным данным;
 - artifacts переиспользуются перед повторной выгрузкой;
+- scheduler отправляет заблокированный план в replanner, если pending/ready задачи зависят от failed/skipped/missing задач;
 - critic предлагает recovery/replacement task, если failed-задача блокирует downstream-задачи;
 - critic может предложить изменить период или фильтры выгрузки, если данные за выбранный период не нашлись;
 - responder переносит важные факты из всех шагов в финальный отчет;
@@ -1571,10 +1574,11 @@ python -m unittest discover -s tests
 - `test_worker_skills.py` - загрузка full skills в worker.
 - `test_worker_lineage.py` - worker lineage.
 - `test_responder_lineage.py` - responder context и final report artifacts.
-- `test_tool_artifacts.py` - artifact capture больших tool results.
+- `test_tool_artifacts.py` - artifact capture больших tool results, DataFrame metadata, sandbox variable references и tool trace.
 - `test_artifact_read_tools.py` - runtime artifact tools.
 - `test_branch_*` - branch и restore.
 - `test_run_inspection_service.py` - read API инспекции run.
+- `test_ui_api.py` - HTTP API, live run и чтение сохраненных runs/artifacts для UI.
 - `test_worker_prompt_contract.py` - инварианты текстов промптов worker/critic/replanner.
 - `test_sandbox_code_executor.py` - исполнение кода и `allowed_libraries` в executor.
 
