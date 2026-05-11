@@ -14,6 +14,7 @@ from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.prebuilt import create_react_agent
 from langgraph.types import Command, Send
@@ -29,26 +30,74 @@ from ..tools.artifact_read_tools import build_artifact_read_tools
 from ..tools.artifact_wrappers import wrap_tools_for_artifacts
 from ..tools.skill_tools import build_skill_read_tools
 
-def _worker_human_invoke_message(task: Task) -> str:
+# Ключи LangGraph Pregel для чтения актуального AgentState из worker-узла (см. CONFIG_KEY_*).
+_CONFIGURABLE_KEY = "configurable"
+_PREGEL_READ_KEY = "__pregel_read"
+
+
+def _initial_user_query_from_graph_state(config: RunnableConfig | None) -> str:
+    """Достаёт исходный запрос из состояния графа на каждом вызове worker.
+
+    Не полагается на поля ``WorkerPayload``: значение читается через ``__pregel_read``,
+    чтобы совпадать с ``AgentState.initial_user_query`` / первым human-сообщением.
+    """
+
+    if config is None:
+        return ""
+    read_fn = config.get(_CONFIGURABLE_KEY, {}).get(_PREGEL_READ_KEY)
+    if read_fn is None or not callable(read_fn):
+        return ""
+    try:
+        chunk = read_fn(["initial_user_query", "messages"], fresh=False)
+    except Exception:
+        return ""
+    if not isinstance(chunk, dict):
+        return ""
+    stored = chunk.get("initial_user_query")
+    if isinstance(stored, str) and stored.strip():
+        return stored.strip()
+    for msg in chunk.get("messages") or []:
+        if isinstance(msg, HumanMessage):
+            content = getattr(msg, "content", "")
+            text = str(content).strip() if content else ""
+            if text:
+                return text
+    return ""
+
+
+def _worker_human_invoke_message(
+        task: Task,
+        initial_user_query: str = "",
+) -> str:
     """Формирует human-сообщение для ReAct worker-а.
 
     Args:
         task: Текущая задача worker-а.
+        initial_user_query: Исходный запрос пользователя на весь запуск.
 
     Returns:
-        Текст инструкции с задачей, выделенной парным тегом ``TASK``.
+        Текст с исходным запросом и конкретной задачей шага (тег ``TASK``).
     """
 
+    query = (initial_user_query or "").strip()
     desc = (task.description or "").strip()
     task_id = task.task_id or DEFAULT_TASK_ID
     retry_context = _format_worker_retry_context(task)
+
+    parts: list[str] = []
+    if query:
+        parts.append(f"Исходный запрос пользователя - {query}")
     if desc:
-        message = (
-            "Выполни поставленную задачу:\n"
+        parts.append(
+            "Твоя конкретная задача для ответа на вопрос пользователя -\n"
             f"<TASK {task_id}>\n{desc}\n</TASK {task_id}>"
         )
     else:
-        message = "Выполни поставленную задачу"
+        parts.append(
+            "Твоя конкретная задача для ответа на вопрос пользователя - "
+            "Выполни поставленную задачу"
+        )
+    message = "\n\n".join(parts)
     if retry_context:
         return f"{message}\n\n{retry_context}"
     return message
@@ -820,6 +869,8 @@ async def worker_node(
         lineage_service: LineageService | None = None,
         artifact_service: ArtifactService | None = None,
         skills_service: SkillsService | None = None,
+        *,
+        config: RunnableConfig | None = None,
 ) -> Command:
     """
     Асинхронный узел-воркер графа LangGraph.
@@ -895,7 +946,8 @@ async def worker_node(
         loaded_skills=loaded_skills,
         installed_packages=installed_packages,
     )
-    human_invoke = _worker_human_invoke_message(task)
+    initial_user_query = _initial_user_query_from_graph_state(config)
+    human_invoke = _worker_human_invoke_message(task, initial_user_query)
     prompt_trace_artifacts = write_prompt_trace(
         artifact_service=artifact_service,
         run_id=payload.run_id,
@@ -905,6 +957,7 @@ async def worker_node(
         human_prompt=human_invoke,
         payload={
             "task": task.model_dump(mode="json"),
+            "initial_user_query": initial_user_query,
             "resolved_inputs": payload.resolved_inputs,
             "dependency_context": payload.dependency_context,
             "artifact_context": payload.artifact_context,

@@ -53,6 +53,10 @@ FilterOperator = Literal[
     "not_null",
 ]
 
+# Только JSON-примитивы: GigaChat и др. провайдеры отклоняют схему с Any
+# (в tool JSON Schema получается anyOf: [{}, {"type": "null"}] без type у первой ветки).
+FilterScalar = str | int | float | bool
+
 
 class SparkTableFilter(BaseModel):
     """Описывает одно ограничение для выборки из Spark-like таблицы.
@@ -73,11 +77,11 @@ class SparkTableFilter(BaseModel):
         default="eq",
         description="Оператор фильтра: eq, ne, gt, gte, lt, lte, contains, in, between, is_null, not_null.",
     )
-    value: Any | None = Field(
+    value: FilterScalar | None = Field(
         default=None,
         description="Значение фильтра для операторов eq/ne/gt/gte/lt/lte/contains.",
     )
-    values: list[Any] | None = Field(
+    values: list[FilterScalar] | None = Field(
         default=None,
         description="Список значений для операторов in и between.",
     )
