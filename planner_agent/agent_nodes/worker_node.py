@@ -565,28 +565,16 @@ def _format_artifact_context(artifact_context: dict[str, Any]) -> str:
     if not isinstance(artifacts, dict) or not artifacts:
         return ""
 
-    lines = [
-        "<artifact_context>",
-        "[artifact_usage_rules]",
-        f"total_available_artifacts: {artifact_context.get('total_available_artifacts', len(artifacts))}",
-        f"shown_artifacts: {len(artifacts)}",
-        f"hidden_artifacts: {artifact_context.get('hidden_artifact_count', 0)}",
-    ]
+    lines = ["<artifact_context>"]
     for artifact_id, artifact in artifacts.items():
         if not isinstance(artifact, dict):
             continue
-        artifact_tag_id = str(artifact_id).strip() or "unknown"
-        lines.append(f"<ARTIFACT {artifact_tag_id}>")
-        lines.append(
-            (
-                f"artifact_id: {artifact_id}; "
-                f"kind: {artifact.get('kind')}; "
-                f"uri: {artifact.get('uri')}; "
-                f"summary: {artifact.get('summary')}; "
-                f"metadata: {artifact.get('metadata') or {}}"
-            )
-        )
-        lines.append(f"</ARTIFACT {artifact_tag_id}>")
+        artifact_name = str(artifact.get("artifact_name") or artifact_id).strip() or "artifact"
+        schema_line = str(artifact.get("schema") or "").strip()
+        lines.append(f"<ARTIFACT {artifact_name}>")
+        if schema_line:
+            lines.append(f"schema: {schema_line}")
+        lines.append(f"</ARTIFACT {artifact_name}>")
     lines.append("</artifact_context>")
     return "\n".join(lines)
 

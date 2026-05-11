@@ -10,6 +10,7 @@ from planner_agent.agent_nodes.planner_node import build_full_plan
 from planner_agent.agent_nodes.worker_node import (
     _create_worker_started_lineage,
     _create_worker_system_prompt,
+    _format_artifact_context,
     _load_task_skills,
     _select_task_tools,
 )
@@ -21,6 +22,23 @@ from planner_agent.tools.skill_tools import build_skill_read_tools
 
 
 class WorkerSkillLoadingTests(unittest.TestCase):
+    def test_worker_artifact_context_prompt_is_name_and_schema_only(self) -> None:
+        block = _format_artifact_context(
+            {
+                "artifacts": {
+                    "196441adc487458bae281cf686a54bd6": {
+                        "artifact_name": "t1_spark_query_table_1",
+                        "schema": "event_id:str",
+                    },
+                },
+            }
+        )
+        self.assertIn("<ARTIFACT t1_spark_query_table_1>", block)
+        self.assertIn("schema: event_id:str", block)
+        self.assertNotIn("uri:", block)
+        self.assertNotIn("metadata:", block)
+        self.assertNotIn("[artifact_usage_rules]", block)
+
     def test_worker_selects_only_task_suggested_tools(self) -> None:
         """Проверяет, что worker получает только явно назначенные domain tools."""
 
@@ -116,14 +134,10 @@ class WorkerSkillLoadingTests(unittest.TestCase):
                             "insight-design": "Build behavioral insights.",
                         },
                         artifact_context={
-                            "total_available_artifacts": 1,
-                            "artifact_count": 1,
                             "artifacts": {
                                 "artifact-1": {
-                                    "kind": "dataset",
-                                    "uri": "C:/workspace/data/transactions.csv",
-                                    "summary": "Transaction export",
-                                    "metadata": {"reusable": True, "editable": True},
+                                    "artifact_name": "df_transactions",
+                                    "schema": "event_id:str, amount:float",
                                 }
                             },
                         },
@@ -135,18 +149,14 @@ class WorkerSkillLoadingTests(unittest.TestCase):
 
             self.assertIn("<task_contract>", prompt)
             self.assertIn("expected_output: Insight with evidence references.", prompt)
-            self.assertIn("validation_criteria:", prompt)
-            self.assertIn("- Cites artifact_id", prompt)
             self.assertIn("required_artifacts:", prompt)
             self.assertIn("- dataset export", prompt)
             self.assertIn("<workspace_context>", prompt)
             self.assertIn("workspace_root: C:/workspace", prompt)
             self.assertIn("<artifact_context>", prompt)
-            self.assertIn("[artifact_usage_rules]", prompt)
-            self.assertIn("Prefer reusing relevant reusable artifacts", prompt)
-            self.assertIn("cite artifact_id and uri", prompt)
-            self.assertIn("artifact_id: artifact-1", prompt)
-            self.assertIn("C:/workspace/data/transactions.csv", prompt)
+            self.assertIn("<ARTIFACT df_transactions>", prompt)
+            self.assertIn("schema: event_id:str, amount:float", prompt)
+            self.assertNotIn("C:/workspace/data/transactions.csv", prompt)
             self.assertIn("<available_skill_previews>", prompt)
             self.assertIn("skill_view", prompt)
             self.assertIn("Build behavioral insights.", prompt)

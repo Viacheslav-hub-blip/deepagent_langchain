@@ -7,6 +7,7 @@ from asyncio import run
 from planner_agent.agent_nodes.scheduler_node import (
     _build_artifact_context,
     _collect_ancestor_data,
+    _select_artifact_ids,
     scheduler_node,
 )
 from planner_agent.models import AgentState, Task, TaskStatus
@@ -80,12 +81,35 @@ class SchedulerLineageTests(unittest.TestCase):
 
         self.assertEqual(context["artifact_count"], 1)
         artifact = context["artifacts"]["artifact-1"]
-        self.assertEqual(artifact["uri"], "C:/workspace/transactions.csv")
-        self.assertTrue(artifact["metadata"]["reusable"])
-        self.assertTrue(artifact["metadata"]["editable"])
+        self.assertEqual(artifact["artifact_name"], "artifact-1")
+        self.assertEqual(artifact["schema"], "")
         self.assertEqual(context["selected_artifact_ids"], ["artifact-1"])
         self.assertEqual(context["hidden_artifact_count"], 0)
-        self.assertNotIn("large_internal_field", artifact["metadata"])
+
+    def test_scheduler_worker_context_skips_tool_trace_and_unknown_refs(self) -> None:
+        state = AgentState(
+            artifact_index={
+                "df1": {
+                    "artifact_id": "df1",
+                    "kind": "dataset",
+                    "metadata": {"columns": ["a"], "column_types": {"a": "int"}},
+                },
+                "tr1": {
+                    "artifact_id": "tr1",
+                    "kind": "tool_trace",
+                    "metadata": {"artifact_role": "tool_call_trace", "task_id": "1"},
+                },
+            },
+            plan={
+                "1": Task(
+                    task_id="1",
+                    description="Analyze",
+                    artifact_refs=["missing-ref"],
+                ),
+            },
+        )
+        task = state.plan["1"]
+        self.assertEqual(_select_artifact_ids(state, task), ["df1"])
 
     def test_scheduler_ingests_upstream_artifacts_into_dependent_worker_payload(self) -> None:
         upstream_artifact = {
@@ -139,15 +163,8 @@ class SchedulerLineageTests(unittest.TestCase):
             ["artifact-events"],
         )
         artifact = artifact_context["artifacts"]["artifact-events"]
-        self.assertEqual(artifact["artifact_id"], "artifact-events")
-        self.assertEqual(artifact["kind"], "dataset")
-        self.assertEqual(artifact["metadata"]["tool_name"], "load_events")
-        self.assertEqual(
-            artifact["metadata"]["capture_reason"],
-            "context_budget_exceeded",
-        )
-        self.assertEqual(artifact["metadata"]["original_size_estimate"], 120000)
-        self.assertNotIn("large_internal_field", artifact["metadata"])
+        self.assertEqual(artifact["artifact_name"], "artifact-events")
+        self.assertEqual(artifact["schema"], "")
 
     def test_scheduler_passes_transitive_dependency_results_to_worker(self) -> None:
         """Проверяет сквозную передачу результатов по цепочке зависимостей."""
@@ -196,8 +213,10 @@ class SchedulerLineageTests(unittest.TestCase):
         command = run(scheduler_node(state))
         payload = command.goto[0].arg
 
-        self.assertIn("Task 1 result: Trigger details", payload.previous_results)
-        self.assertIn("Task 2 result: Transactions artifact is ready", payload.previous_results)
+        deps = payload.dependency_context.get("dependencies") or []
+        previews = " ".join(str(d.get("result_preview") or "") for d in deps)
+        self.assertIn("Trigger details", previews)
+        self.assertIn("Transactions artifact is ready", previews)
         self.assertEqual(
             payload.artifact_context["selected_artifact_ids"][:2],
             ["artifact-transactions", "artifact-trigger"],

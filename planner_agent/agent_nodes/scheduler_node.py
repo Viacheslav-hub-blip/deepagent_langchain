@@ -582,6 +582,8 @@ def _select_artifact_ids(state: AgentState, task: Task) -> list[str]:
     def add_many(ids: list[str]) -> None:
         for artifact_id in ids:
             payload = (state.artifact_index or {}).get(artifact_id)
+            if not isinstance(payload, dict):
+                continue
             if _is_excluded_worker_context_artifact(payload):
                 continue
             if artifact_id and artifact_id not in ordered:
@@ -613,6 +615,8 @@ def _is_excluded_worker_context_artifact(payload: Any) -> bool:
 
     if not isinstance(payload, dict):
         return False
+    if str(payload.get("kind") or "") == "tool_trace":
+        return True
     metadata = payload.get("metadata")
     if not isinstance(metadata, dict):
         return False
@@ -632,29 +636,24 @@ def _compact_artifact_payload(payload: dict[str, Any]) -> dict[str, Any]:
     metadata = payload.get("metadata")
     if not isinstance(metadata, dict):
         metadata = {}
-    summary = str(payload.get("summary") or "")
+    artifact_id = str(payload.get("artifact_id") or "").strip()
+    variable_name = str(
+        metadata.get("variable_name")
+        or metadata.get("sandbox_variable_name")
+        or artifact_id
+        or "artifact"
+    ).strip()
+    columns = metadata.get("columns")
+    column_types = metadata.get("column_types")
+    schema = ""
+    if isinstance(columns, list) and columns:
+        if isinstance(column_types, dict):
+            schema = ", ".join(f"{col}:{column_types.get(col, '?')}" for col in columns)
+        else:
+            schema = ", ".join(str(col) for col in columns)
     return {
-        "artifact_id": payload.get("artifact_id"),
-        "kind": payload.get("kind"),
-        "uri": payload.get("uri"),
-        "mime_type": payload.get("mime_type"),
-        "summary": _limit_text(summary, max_chars=MAX_ARTIFACT_SUMMARY_CHARS),
-        "checksum": payload.get("checksum"),
-        "metadata": {
-            key: metadata[key]
-            for key in (
-                "task_id",
-                "tool_name",
-                "artifact_role",
-                "reusable",
-                "editable",
-                "branched_from_artifact_id",
-                "edited_override",
-                "capture_reason",
-                "original_size_estimate",
-            )
-            if key in metadata
-        },
+        "artifact_name": variable_name,
+        "schema": schema,
     }
 
 
