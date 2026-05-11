@@ -35,6 +35,13 @@ _REASON_FAILED: Final[str] = "Ошибка выполнения Worker"
 _REASON_SKIPPED: Final[str] = "Задача была намеренно пропущена"
 _REASON_CRASHED: Final[str] = "Сбой валидатора: {exc}"
 _REASON_VALIDATION_FAILED: Final[str] = "Ошибка валидации: {reasoning}"
+_CRITIC_CONFIG_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "critic_feedback",
+        "critic_retry_count",
+        "previous_worker_result_before_critic_retry",
+    }
+)
 
 
 def _build_human_prompt(task: Task) -> str:
@@ -50,10 +57,15 @@ def _build_human_prompt(task: Task) -> str:
     worker_preview = task.result_preview or ""
     worker_full_result = task.full_result or ""
     worker_error_log = task.error_log or ""
+    sanitized_config = {
+        key: value
+        for key, value in (task.config or {}).items()
+        if key not in _CRITIC_CONFIG_KEYS
+    }
 
     return (
         f"Описание задачи: {task.description}\n"
-        f"Конфигурация задачи: {task.config}\n\n"
+        f"Конфигурация задачи: {sanitized_config}\n\n"
         "Предварительный вывод инструмента worker (сырая сводка инструмента/выполнения):\n"
         f"{worker_preview}\n\n"
         "Финальный ответ worker:\n"
