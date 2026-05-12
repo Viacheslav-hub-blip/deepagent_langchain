@@ -6,7 +6,6 @@
 - _strip_code_fences: удаление markdown code fences.
 - _extract_balanced_json: поиск сбалансированного JSON внутри текста.
 - _json_candidates: построение кандидатов для JSON-парсинга.
-- _short_error: сокращение текста ошибки для консольного прогресса.
 - parse_structured_response: валидация ответа модели по Pydantic-схеме.
 - invoke_structured_output: вызов модели и получение Pydantic-объекта.
 """
@@ -193,21 +192,6 @@ def _json_candidates(text: str) -> list[str]:
     return candidates
 
 
-def _short_error(error: Exception, max_length: int = 700) -> str:
-    """Сокращает текст ошибки для вывода в консоль.
-
-    Args:
-        error: Исключение, которое нужно показать оператору.
-        max_length: Максимальная длина возвращаемой строки.
-
-    Returns:
-        Короткая однострочная версия ошибки.
-    """
-
-    text = str(error).replace("\n", " ")
-    return text[:max_length]
-
-
 def parse_structured_response(schema: type[StructuredModelT], response: object) -> StructuredModelT:
     """Парсит ответ модели в Pydantic-схему.
 
@@ -267,8 +251,6 @@ async def invoke_structured_output(
             ответ ни обычным вызовом, ни fallback-вызовом.
     """
 
-    schema_name = getattr(schema, "__name__", str(schema))
-    print(f"[llm] structured request started: {schema_name}", flush=True)
     raw_exc: Exception | None = None
     current_messages = list(messages)
     for attempt in range(STRUCTURED_OUTPUT_PARSE_RETRIES + 1):
@@ -279,20 +261,9 @@ async def invoke_structured_output(
 
         try:
             parsed = parse_structured_response(schema, raw_response)
-            print(
-                f"[llm] structured request parsed from raw response: {schema_name}",
-                flush=True,
-            )
             return parsed
         except Exception as parse_exc:
             raw_exc = parse_exc
-            print(
-                (
-                    f"[llm] raw structured parsing failed: {schema_name} "
-                    f"attempt={attempt + 1} | {_short_error(parse_exc)}"
-                ),
-                flush=True,
-            )
             if attempt >= STRUCTURED_OUTPUT_PARSE_RETRIES:
                 break
             current_messages = [
@@ -309,10 +280,6 @@ async def invoke_structured_output(
             ]
 
     assert raw_exc is not None
-    print(
-        f"[llm] raw structured parsing failed: {schema_name} | {_short_error(raw_exc)}",
-        flush=True,
-    )
     if not ENABLE_STRUCTURED_OUTPUT_FALLBACK:
         raise ValueError(
             "Structured output raw parsing failed. "
@@ -320,13 +287,8 @@ async def invoke_structured_output(
             f"Raw parser error: {raw_exc}"
         ) from raw_exc
 
-    print(
-        f"[llm] raw structured parsing failed, trying with_structured_output: {schema_name}",
-        flush=True,
-    )
     try:
         parsed = await llm.with_structured_output(schema).ainvoke(messages)
-        print(f"[llm] structured request parsed by model wrapper: {schema_name}", flush=True)
         return parsed
     except Exception as structured_exc:
         raise ValueError(

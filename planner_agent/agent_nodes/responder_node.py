@@ -20,7 +20,6 @@
 - _format_responder_context_artifact: сбор markdown-копии стартового контекста responder.
 - _build_responder_react_tools: инструмент ``submit_final_report`` и artifact_* tools.
 - _normalize_final_markdown: нормализация итогового markdown с заголовком отчёта.
-- _format_responder_tool_calls_for_console: компактный вывод tool calls responder.
 - _extract_responder_tool_calls_from_messages: извлечение tool calls responder с preview результатов.
 - _format_fallback_message: fallback-отчет при ошибке генерации.
 - responder_node: LangGraph-узел финального отчёта (LangGraph ReAct + чтение artifacts).
@@ -703,37 +702,6 @@ def _extract_final_markdown_from_react(
     raise ValueError("Responder ReAct did not call submit_final_report and left no final text.")
 
 
-def _format_responder_tool_calls_for_console(react_messages: list[Any]) -> str:
-    """Формирует компактный отчёт по вызовам инструментов responder ReAct.
-
-    Args:
-        react_messages: Сообщения, возвращённые ``create_react_agent().ainvoke``.
-
-    Returns:
-        Многострочный текст для консольного блока.
-    """
-
-    lines: list[str] = []
-    for msg in react_messages:
-        if not isinstance(msg, AIMessage):
-            continue
-        for raw_call in getattr(msg, "tool_calls", None) or []:
-            if not isinstance(raw_call, dict):
-                continue
-            name = str(raw_call.get("name") or "unknown")
-            args = raw_call.get("args")
-            args_text = (
-                json.dumps(args, ensure_ascii=False, indent=2)
-                if isinstance(args, dict)
-                else str(args)
-            )
-            lines.append(f"- tool: {name}\n  args: {args_text}")
-
-    if not lines:
-        return "Responder did not call any tools."
-    return "\n".join(lines)
-
-
 def _extract_responder_tool_calls_from_messages(
         react_messages: list[Any],
 ) -> list[dict[str, Any]]:
@@ -875,7 +843,6 @@ async def responder_node(
     )
 
     await _print_content_block("RESPONDER SYSTEM PROMPT", system_prompt)
-    await _print_content_block("RESPONDER HUMAN CONTEXT", human_message)
     prompt_trace_artifacts = write_prompt_trace(
         artifact_service=artifact_service,
         run_id=state.run_id,
@@ -903,10 +870,6 @@ async def responder_node(
             config={"recursion_limit": RESPONDER_REACT_RECURSION_LIMIT},
         )
         react_messages = react_state.get("messages", [])
-        await _print_content_block(
-            "RESPONDER TOOL CALLS",
-            _format_responder_tool_calls_for_console(react_messages),
-        )
         tool_call_artifacts = write_tool_calls_trace(
             artifact_service=artifact_service,
             run_id=state.run_id,

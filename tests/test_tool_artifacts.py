@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import json
 from asyncio import run
 from pathlib import Path
 
@@ -91,7 +92,8 @@ class ToolArtifactTests(unittest.TestCase):
             self.assertIn("column_types:", result)
             self.assertIn("has_empty_values: true", result)
             self.assertIn("variable_name: tdf_load_load_client_events_1", result)
-            self.assertNotIn("evt-secret-1", result)
+            self.assertIn("preview_row:", result)
+            self.assertIn("evt-secret-1", result)
             self.assertIn("tdf_load_load_client_events_1", sandbox.globals)
             self.assertIs(sandbox.globals["tdf_load_load_client_events_1"], sandbox.globals[sandbox.last_dataframe_variable])
 
@@ -103,7 +105,9 @@ class ToolArtifactTests(unittest.TestCase):
             )
             self.assertEqual(captured_artifact.kind, "dataset")
             self.assertEqual(captured_artifact.mime_type, "text/csv")
+            self.assertTrue(captured_artifact.uri.endswith(f"{captured_artifact.artifact_id}.csv"))
             self.assertEqual(captured_artifact.metadata["row_count"], 2)
+            self.assertIn("evt-secret-1", captured_artifact.metadata["preview_row"])
             self.assertEqual(
                 captured_artifact.metadata["variable_name"],
                 "tdf_load_load_client_events_1",
@@ -125,7 +129,7 @@ class ToolArtifactTests(unittest.TestCase):
             )
             trace_content = Path(trace_artifact.uri).read_text(encoding="utf-8")
             self.assertIn('"row_count": 2', trace_content)
-            self.assertNotIn("evt-secret-1", trace_content)
+            self.assertIn("evt-secret-1", trace_content)
 
             captured_content = Path(captured_artifact.uri).read_text(encoding="utf-8")
             self.assertIn("evt-secret-1", captured_content)
@@ -158,7 +162,11 @@ class ToolArtifactTests(unittest.TestCase):
                 )
             )
 
-            self.assertEqual(result, "transactions depth=30 amount=1000.0")
+            response = json.loads(result)
+            self.assertTrue(response["ok"])
+            self.assertEqual(response["tool_name"], "download_transactions")
+            self.assertEqual(response["result"], "transactions depth=30 amount=1000.0")
+            self.assertIn("next_steps", response)
             # Маленький скалярный результат остается inline и не попадает в
             # task.artifact_refs (только большие/файловые артефакты значимы).
             self.assertEqual(task.artifact_refs, [])
@@ -321,8 +329,11 @@ class ToolArtifactTests(unittest.TestCase):
 
             result = run(wrapped_tool.ainvoke({"client_id": "client-2"}))
 
-            self.assertIsInstance(result, list)
-            self.assertEqual(result[0]["event_id"], "evt-1")
+            response = json.loads(result)
+            self.assertTrue(response["ok"])
+            self.assertEqual(response["tool_name"], "load_day_events")
+            self.assertEqual(response["result"][0]["event_id"], "evt-1")
+            self.assertIn("artifact_refs", response)
 
             stored = artifacts.list_artifacts("run-small-list")
             dataset_artifact = next(
@@ -341,6 +352,43 @@ class ToolArtifactTests(unittest.TestCase):
             self.assertNotIn(dataset_artifact.artifact_id, task.artifact_refs)
             self.assertIn(dataset_artifact.artifact_id, artifact_index)
             self.assertEqual(dataset_artifact.artifact_id, "tsmall-list_load_day_events_1")
+
+    def test_tool_exception_returns_actionable_error_for_model(self) -> None:
+        """Проверяет, что исключение инструмента возвращается как понятный JSON."""
+
+        @tool("load_missing_source")
+        async def load_missing_source(source_file: str) -> str:
+            """Raise a source loading error."""
+            raise FileNotFoundError(f"Source not found: {source_file}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifacts = ArtifactService(tmp)
+            task = Task(task_id="err", description="Load missing source")
+            artifact_index: dict = {}
+            tool_traces: list[dict] = []
+
+            wrapped_tool = wrap_tools_for_artifacts(
+                tools=[load_missing_source],
+                artifact_service=artifacts,
+                run_id="run-error",
+                node_id="node-error",
+                task=task,
+                artifact_index=artifact_index,
+                tool_traces=tool_traces,
+            )[0]
+
+            raw = run(wrapped_tool.ainvoke({"source_file": "missing.csv"}))
+            response = json.loads(raw)
+
+            self.assertFalse(response["ok"])
+            self.assertEqual(response["tool_name"], "load_missing_source")
+            self.assertIn("Source not found", response["error"]["message"])
+            self.assertIn("solution_options", response)
+            self.assertIn("retry_guidance", response)
+            self.assertIn("tool_trace_artifact_id", response)
+            self.assertEqual(len(tool_traces), 1)
+            self.assertTrue(tool_traces[0]["tool_error"])
+            self.assertIn(response["tool_trace_artifact_id"], artifact_index)
 
     def test_artifact_read_chunk_capture_is_not_added_to_task_refs(self) -> None:
         """artifact_* мета-инструменты не должны загромождать task.artifact_refs."""

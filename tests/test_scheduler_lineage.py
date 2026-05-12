@@ -264,6 +264,8 @@ class SchedulerLineageTests(unittest.TestCase):
         previews = " ".join(str(d.get("result_preview") or "") for d in deps)
         self.assertIn("Trigger details", previews)
         self.assertIn("Transactions artifact is ready", previews)
+        self.assertIn("Trigger details", payload.previous_results)
+        self.assertIn("Transactions artifact is ready", payload.previous_results)
         self.assertEqual(
             payload.artifact_context["selected_artifact_ids"][:2],
             ["artifact-transactions", "artifact-trigger"],

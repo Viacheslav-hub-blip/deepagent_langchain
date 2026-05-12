@@ -161,6 +161,9 @@ class SandboxCodeExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("SyntaxError", result["error"])
         self.assertIn("traceback", result)
         self.assertEqual(result["target_variable"], "broken_result")
+        self.assertIn("possible_causes", result)
+        self.assertIn("solution_options", result)
+        self.assertIn("retry_guidance", result)
 
     async def test_python_analysis_returns_runtime_error_as_json(self) -> None:
         """Проверяет, что runtime-ошибка видна модели вместе с traceback."""
@@ -181,6 +184,8 @@ class SandboxCodeExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("NameError", result["error"])
         self.assertIn("missing_dataframe", result["generated_code"])
         self.assertIn("missing_dataframe", result["traceback"])
+        self.assertTrue(result["possible_causes"])
+        self.assertTrue(result["solution_options"])
 
     async def test_worker_keeps_failed_code_and_error_for_retry(self) -> None:
         """Проверяет сохранение кода и ошибки worker-а после ошибки инструмента."""
@@ -207,6 +212,32 @@ class SandboxCodeExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(task.generated_code, "result = missing_dataframe.copy()")
         self.assertEqual(task.output_variable_name, "result")
         self.assertIn("missing_dataframe", task.error_log)
+
+    async def test_worker_treats_ok_false_tool_json_as_failure(self) -> None:
+        """Проверяет, что tool-ответ ``ok=false`` не считается успешным."""
+
+        task = Task(
+            task_id="t2",
+            description="Загрузить транзакции из таблицы.",
+        )
+        raw_output = json.dumps(
+            {
+                "ok": False,
+                "error": {
+                    "code": "unknown_columns",
+                    "missing_columns": ["account_id"],
+                },
+                "schema": {"columns": [{"name": "event_id"}]},
+            },
+            ensure_ascii=False,
+        )
+
+        success = await _apply_tool_output(task, raw_output)
+
+        self.assertFalse(success)
+        self.assertIn("ok=false", task.error_log)
+        self.assertIn("unknown_columns", task.error_log)
+        self.assertIn("account_id", task.error_log)
 
     async def test_factory_replaces_legacy_code_generator_with_python_analysis(self) -> None:
         """Проверяет, что legacy генератор кода скрывается из worker tools."""

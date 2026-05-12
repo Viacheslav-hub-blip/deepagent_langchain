@@ -8,7 +8,6 @@
 
 import asyncio
 import json
-import logging
 import re
 from typing import Any
 
@@ -151,13 +150,13 @@ DEFAULT_TASK_ID: str = "unknown_task"
 CRITIC_NODE_NAME: str = "critic"
 
 # Максимальная длина превью результата (символов)
-RESULT_PREVIEW_MAX_LEN: int = 3_000
+RESULT_PREVIEW_MAX_LEN: int = 20_000
 
 # Максимальная длина полного ответа worker-а, сохраняемого в plan для следующих узлов.
-FULL_RESULT_STATE_MAX_LEN: int = 8_000
+FULL_RESULT_STATE_MAX_LEN: int = 200_000
 
 # Максимальная длина вывода в лог воркера (символов)
-WORKER_LOG_MAX_LEN: int = 4_000
+WORKER_LOG_MAX_LEN: int = 50_000
 
 # Максимальная длина краткого описания artifact в индексе
 ARTIFACT_SUMMARY_MAX_LEN: int = 500
@@ -195,9 +194,6 @@ PREFERRED_INSTALLED_PACKAGES: tuple[str, ...] = (
     "sqlalchemy",
     "requests",
 )
-
-logger = logging.getLogger(__name__)
-
 
 async def _print_content_block(title: str, content: str) -> None:
     """Асинхронно выводит читаемый блок worker-диагностики в терминал.
@@ -536,7 +532,7 @@ def _format_dependency_context(dependency_context: dict[str, Any]) -> str:
                 f"output_variable_name: {dependency.get('output_variable_name')}; "
                 f"artifact_refs: {dependency.get('artifact_refs')}; "
                 f"description: {dependency.get('description')}; "
-                f"result_preview: {dependency.get('result_preview')}"
+                f"result: {dependency.get('result') or dependency.get('result_preview')}"
             )
         )
         if dependency.get("error_log"):
@@ -581,7 +577,19 @@ def _format_artifact_context(artifact_context: dict[str, Any]) -> str:
         schema_line = str(artifact.get("schema") or "").strip()
         lines.append(f"<ARTIFACT {artifact_name}>")
         if schema_line:
+            dataframe_file_name = str(artifact.get("dataframe_file_name") or "").strip()
+            tool_name = str(artifact.get("tool_name") or "").strip()
+            preview_row = str(artifact.get("preview_row") or "").strip()
+            lines.append(
+                "Схема загруженного из инстурмента dataframe: "
+                f"{schema_line}. "
+                f"название файла с datafrme  - {dataframe_file_name or artifact_name}. "
+                "Для того чтобы загрузить dataframe вы должны использовать "
+                f"инструмент - {tool_name or 'artifact_read_tools'}"
+            )
             lines.append(f"schema: {schema_line}")
+            if preview_row:
+                lines.append(f"preview_row: {preview_row}")
         lines.append(f"</ARTIFACT {artifact_name}>")
     lines.append("</artifact_context>")
     return "\n".join(lines)
@@ -710,6 +718,18 @@ async def _apply_tool_output(task: Task, raw_output: str) -> bool:
         task.result_preview = parsed.get("message")
         return False
 
+    if isinstance(parsed, dict) and "ok" in parsed:
+        task.result_preview = _limit_text(
+            json.dumps(parsed, ensure_ascii=False, default=str),
+            max_chars=RESULT_PREVIEW_MAX_LEN,
+        )
+        if parsed.get("ok") is True:
+            task.error_log = None
+            return True
+
+        task.error_log = _format_tool_error_log(parsed)
+        return False
+
     # JSON, но без флага success — сохраняем строковое представление
     task.result_preview = _limit_text(str(parsed), max_chars=RESULT_PREVIEW_MAX_LEN)
     task.error_log = None
@@ -733,9 +753,26 @@ def _format_tool_error_log(parsed: dict[str, Any]) -> str:
             or "Неизвестная ошибка инструмента"
         )
     ]
+    if parsed.get("ok") is False:
+        lines.insert(0, "Tool returned ok=false")
     if parsed.get("execution_output"):
         lines.append("stdout/stderr:")
         lines.append(str(parsed.get("execution_output")))
+    if parsed.get("traceback"):
+        lines.append("traceback:")
+        lines.append(str(parsed.get("traceback")))
+    if parsed.get("possible_causes"):
+        lines.append("possible_causes:")
+        lines.append(json.dumps(parsed.get("possible_causes"), ensure_ascii=False, default=str))
+    if parsed.get("solution_options"):
+        lines.append("solution_options:")
+        lines.append(json.dumps(parsed.get("solution_options"), ensure_ascii=False, default=str))
+    if parsed.get("retry_guidance"):
+        lines.append("retry_guidance:")
+        lines.append(str(parsed.get("retry_guidance")))
+    if parsed.get("schema"):
+        lines.append("schema:")
+        lines.append(json.dumps(parsed.get("schema"), ensure_ascii=False, default=str))
     return "\n".join(line for line in lines if line)
 
 
@@ -770,22 +807,19 @@ def _get_last_message(messages: list[Any], message_type: type) -> Any | None:
 
 
 def _format_react_message_for_console(message: Any) -> tuple[str, str] | None:
-    """Форматирует одно сообщение ReAct worker-а для потокового вывода.
+    """Форматирует только входные и выходные данные инструментов worker-а.
 
     Args:
         message: Сообщение LangChain из внутреннего ReAct-агента worker-а.
 
     Returns:
         Пара ``(title, content)`` для консольного блока или ``None`` для
-        сообщений, которые не нужно выводить.
+        сообщений без tool input/output.
     """
 
     if isinstance(message, AIMessage):
         tool_calls = getattr(message, "tool_calls", None) or []
         lines: list[str] = []
-        content = str(message.content or "").strip()
-        if content:
-            lines.append(content)
         for raw_call in tool_calls:
             call = _tool_call_record_to_dict(raw_call)
             name = call.get("name") or "unknown_tool"
@@ -797,7 +831,6 @@ def _format_react_message_for_console(message: Any) -> tuple[str, str] | None:
             )
             lines.extend(
                 [
-                    "",
                     f"tool: {name}",
                     f"tool_call_id: {call.get('id') or call.get('tool_call_id') or ''}",
                     "args:",
@@ -806,14 +839,14 @@ def _format_react_message_for_console(message: Any) -> tuple[str, str] | None:
             )
         if not lines:
             return None
-        return "WORKER STREAM: AI MESSAGE", "\n".join(lines)
+        return "WORKER TOOL INPUT", "\n".join(lines)
 
     if isinstance(message, ToolMessage):
         tool_name = getattr(message, "name", None) or "unknown_tool"
         tool_call_id = getattr(message, "tool_call_id", None) or ""
         content = str(message.content or "")
         return (
-            f"WORKER STREAM: TOOL RESULT {tool_name}",
+            f"WORKER TOOL OUTPUT {tool_name}",
             f"tool_call_id: {tool_call_id}\nresult:\n{content}",
         )
 
@@ -901,7 +934,7 @@ def _normalize_ai_tool_arguments(tc_dict: dict[str, Any]) -> Any:
 def extract_react_tool_calls_from_messages(
         messages: list[Any],
         *,
-        result_preview_max_chars: int = 4_000,
+        result_preview_max_chars: int = 200_000,
 ) -> list[dict[str, Any]]:
     """Собирает последовательность вызовов инструментов из истории ReAct-агента.
 
@@ -1042,7 +1075,7 @@ async def worker_node(
         loaded_skills=loaded_skills,
         installed_packages=installed_packages,
     )
-    initial_user_query = _initial_user_query_from_graph_state(config)
+    initial_user_query = _initial_user_query_from_graph_state(config) or payload.initial_user_query
     human_invoke = _worker_human_invoke_message(task, initial_user_query)
     prompt_trace_artifacts = write_prompt_trace(
         artifact_service=artifact_service,
@@ -1118,7 +1151,6 @@ async def worker_node(
         )
 
     except Exception as exc:
-        logger.exception("Воркер завершился с ошибкой для задачи '%s'", task_id)
         task.status = TaskStatus.FAILED
         task.error_log = str(exc)
         react_message_tool_calls = []

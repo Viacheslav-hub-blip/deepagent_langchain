@@ -23,10 +23,12 @@ import plotly.express as px
 
 from examples.fake_spark_tools import build_fake_spark_tools
 from model import model as deepseek_model
+from model import gigachat 
 from planner_agent import ResearchAgent
 from sandbox import ClientPythonSandbox
 from planner_agent.http_api import ApiSettings, create_app
 from planner_agent.http_api.config import ApiServices
+
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent

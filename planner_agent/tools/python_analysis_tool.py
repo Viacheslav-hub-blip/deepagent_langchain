@@ -9,6 +9,9 @@
 - _validate_code_policy: статическая проверка кода перед выполнением.
 - _ensure_common_libraries: добавление популярных аналитических библиотек в sandbox.
 - _execute_python_code: компиляция и выполнение кода в sandbox.
+- _python_error_possible_causes: вероятные причины ошибки python_analysis.
+- _python_error_solution_options: варианты исправления ошибки python_analysis.
+- _python_retry_guidance: краткая инструкция по retry после ошибки.
 - _preview_value: компактный предпросмотр значения для ответа модели.
 - _json_default: сериализация нестандартных объектов в JSON.
 - _limit_text: ограничение длинных текстовых полей.
@@ -131,6 +134,9 @@ class PythonExecutionResult:
     error: str = ""
     traceback_text: str = ""
     available_variables: list[str] | None = None
+    possible_causes: list[str] | None = None
+    solution_options: list[str] | None = None
+    retry_guidance: str = ""
 
     def to_json(self) -> str:
         """Сериализует результат выполнения в JSON-строку для модели.
@@ -149,6 +155,9 @@ class PythonExecutionResult:
             "error": self.error,
             "traceback": self.traceback_text,
             "available_variables": self.available_variables or [],
+            "possible_causes": self.possible_causes or [],
+            "solution_options": self.solution_options or [],
+            "retry_guidance": self.retry_guidance,
         }
         return json.dumps(payload, ensure_ascii=False, default=_json_default)
 
@@ -415,6 +424,9 @@ def _execute_python_code(
             error=f"{exc.__class__.__name__}: {exc}",
             traceback_text=_limit_text(traceback.format_exc(), max_chars=MAX_STDIO_CHARS),
             available_variables=_visible_variable_names(getattr(sandbox, "globals", {})),
+            possible_causes=_python_error_possible_causes(exc),
+            solution_options=_python_error_solution_options(exc),
+            retry_guidance=_python_retry_guidance(),
         )
 
     globals_dict = getattr(sandbox, "globals", None)
@@ -426,6 +438,9 @@ def _execute_python_code(
             target_variable=target_name,
             error="InvalidSandbox: sandbox.globals is not a dictionary",
             available_variables=[],
+            possible_causes=["Sandbox не предоставляет словарь globals для выполнения кода."],
+            solution_options=["Проверь конфигурацию sandbox в ResearchAgent/factory перед повторным запуском."],
+            retry_guidance="Эту ошибку нельзя исправить изменением Python-кода; нужна корректная sandbox-конфигурация.",
         )
 
     _ensure_common_libraries(globals_dict)
@@ -444,6 +459,9 @@ def _execute_python_code(
             error=f"{exc.__class__.__name__}: {exc}",
             traceback_text=_limit_text(traceback.format_exc(), max_chars=MAX_STDIO_CHARS),
             available_variables=_visible_variable_names(globals_dict),
+            possible_causes=_python_error_possible_causes(exc),
+            solution_options=_python_error_solution_options(exc),
+            retry_guidance=_python_retry_guidance(),
         )
 
     if target_name not in globals_dict:
@@ -458,6 +476,14 @@ def _execute_python_code(
             execution_output=_combined_stdio(stdout, stderr),
             error=f"MissingTargetVariable: {target_name}",
             available_variables=_visible_variable_names(globals_dict),
+            possible_causes=[
+                f"Код выполнился, но не создал обязательную переменную '{target_name}'.",
+            ],
+            solution_options=[
+                f"Добавь присваивание результата в переменную '{target_name}'.",
+                "Проверь, что присваивание выполняется на всех ветках кода.",
+            ],
+            retry_guidance=_python_retry_guidance(),
         )
 
     value = globals_dict[target_name]
@@ -600,6 +626,72 @@ def _combined_stdio(stdout: io.StringIO, stderr: io.StringIO) -> str:
     if err_text:
         parts.append(f"stderr:\n{err_text}")
     return _limit_text("\n".join(parts), max_chars=MAX_STDIO_CHARS)
+
+
+def _python_error_possible_causes(exc: Exception) -> list[str]:
+    """Возвращает вероятные причины ошибки python_analysis.
+
+    Args:
+        exc: Исключение валидации, компиляции или выполнения кода.
+
+    Returns:
+        Список причин, которые модель может использовать для исправления.
+    """
+
+    if isinstance(exc, SyntaxError):
+        return ["Сгенерированный Python-код содержит синтаксическую ошибку."]
+    if isinstance(exc, NameError):
+        return [
+            "Код ссылается на переменную, которой нет в sandbox.",
+            "Имя переменной могло быть взято из описания задачи, а не из available_variables.",
+        ]
+    if isinstance(exc, KeyError):
+        return ["В DataFrame/dict отсутствует запрошенная колонка или ключ."]
+    if isinstance(exc, ImportError):
+        return ["Импортируемая библиотека недоступна в sandbox или запрещена политикой."]
+    if isinstance(exc, ValueError):
+        return ["Аргумент, имя переменной или операция имеют недопустимое значение."]
+    return ["Код столкнулся с ошибкой выполнения; точная причина указана в traceback."]
+
+
+def _python_error_solution_options(exc: Exception) -> list[str]:
+    """Возвращает варианты исправления ошибки python_analysis.
+
+    Args:
+        exc: Исключение валидации, компиляции или выполнения кода.
+
+    Returns:
+        Практические варианты следующего вызова инструмента.
+    """
+
+    options = [
+        "Проверь available_variables и используй только существующие имена переменных.",
+        "Исправь generated_code с учетом traceback и повтори python_analysis.",
+        "Сохрани результат в target_variable, указанный в вызове инструмента.",
+    ]
+    if isinstance(exc, SyntaxError):
+        options.insert(0, "Исправь синтаксис Python-кода перед повторным запуском.")
+    if isinstance(exc, NameError):
+        options.insert(0, "Замени отсутствующую переменную на существующую из available_variables или создай ее явно.")
+    if isinstance(exc, KeyError):
+        options.insert(0, "Проверь реальные названия колонок через preview/schema перед обращением к ним.")
+    if isinstance(exc, ImportError):
+        options.insert(0, "Используй библиотеку из списка available_python_packages или стандартные pandas/numpy.")
+    return options
+
+
+def _python_retry_guidance() -> str:
+    """Возвращает краткую инструкцию по retry для python_analysis.
+
+    Returns:
+        Текст, объясняющий как повторять вызов после ошибки.
+    """
+
+    return (
+        "Не повторяй тот же код без изменений. Используй generated_code, error, "
+        "traceback и available_variables из этого ответа, исправь причину и "
+        "повтори python_analysis."
+    )
 
 
 def _visible_variable_names(globals_dict: dict[str, Any]) -> list[str]:

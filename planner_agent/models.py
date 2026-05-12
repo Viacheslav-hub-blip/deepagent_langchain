@@ -64,10 +64,6 @@ class TaskBase(BaseModel):
         default=None,
         description="Expected concrete output for the task.",
     )
-    validation_criteria: List[str] = Field(
-        default_factory=list,
-        description="Task-specific criteria that the validator should check.",
-    )
     suggested_tools: List[str] = Field(
         default_factory=list,
         description="Tool names that are likely useful for this task.",
@@ -134,7 +130,11 @@ class PlanUpdate(BaseModel):
 class PlannedTask(TaskBase):
     """Задача в полном плане, возвращаемом planner/replanner."""
 
-    task_id: str = Field(description="Stable task ID. Example: 1, 2, 3")
+    task_id: int = Field(description="Stable numeric task ID. Example: 1, 2, 3")
+    dependencies: List[int] = Field(
+        default_factory=list,
+        description="Numeric task IDs that must be completed before this task.",
+    )
 
 
 class FullPlan(BaseModel):
@@ -317,6 +317,10 @@ class WorkerPayload(BaseModel):
         ),
     )
     artifact_context: Dict[str, Any] = Field(default_factory=dict)
+    initial_user_query: str = Field(
+        default="",
+        description="Исходный пользовательский запрос, ради которого выполняется задача.",
+    )
     run_id: str = ""
     parent_node_ids: List[str] = Field(default_factory=list)
 

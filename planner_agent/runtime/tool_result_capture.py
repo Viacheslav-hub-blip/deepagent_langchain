@@ -415,6 +415,9 @@ def _capture_generated_artifact(
     safe_capture_id = _safe_filename_fragment(capture_id or "result")
     result_metadata = _build_result_metadata(raw_result)
     variable_name = _build_variable_name(artifact_label or safe_tool_name)
+    artifact_filename_stem = _safe_filename_fragment(
+        artifact_label or f"{safe_tool_name}-{safe_capture_id}"
+    )
     if isinstance(raw_result, bytes):
         content: str | bytes = raw_result
     elif _is_dataframe(raw_result):
@@ -432,7 +435,7 @@ def _capture_generated_artifact(
         kind=kind,
         filename=(
             f"tasks/{safe_task_id}/tool_results/"
-            f"{safe_tool_name}-{safe_capture_id}.{extension}"
+            f"{artifact_filename_stem}.{extension}"
         ),
         content=content,
         mime_type=mime_type,
@@ -451,6 +454,7 @@ def _capture_generated_artifact(
             "has_empty_values": result_metadata["has_empty_values"],
             "has_empty_values_by_column": result_metadata["has_empty_values_by_column"],
             "empty_value_counts_by_column": result_metadata["empty_value_counts_by_column"],
+            "preview_row": result_metadata["preview_row"],
             "variable_name": variable_name if _is_dataframe(raw_result) else "",
             "sandbox_variable_name": variable_name if _is_dataframe(raw_result) else "",
             "reusable": True,
@@ -738,6 +742,7 @@ def _build_result_metadata(raw_result: Any) -> dict[str, Any]:
                 "has_empty_values_by_column": has_empty_values_by_column,
                 "empty_value_counts_by_column": empty_counts,
                 "has_nan_by_column": has_empty_values_by_column,
+                "preview_row": _dataframe_preview_row(raw_result),
             }
         except Exception:
             return {
@@ -749,6 +754,7 @@ def _build_result_metadata(raw_result: Any) -> dict[str, Any]:
                 "has_empty_values_by_column": {},
                 "empty_value_counts_by_column": {},
                 "has_nan_by_column": {},
+                "preview_row": "",
             }
 
     records = _to_records(raw_result)
@@ -762,6 +768,7 @@ def _build_result_metadata(raw_result: Any) -> dict[str, Any]:
             "has_empty_values_by_column": {},
             "empty_value_counts_by_column": {},
             "has_nan_by_column": {},
+            "preview_row": "",
         }
 
     columns = sorted({str(key) for record in records for key in record.keys()})
@@ -784,6 +791,7 @@ def _build_result_metadata(raw_result: Any) -> dict[str, Any]:
         "has_empty_values_by_column": has_empty_values_by_column,
         "empty_value_counts_by_column": empty_value_counts_by_column,
         "has_nan_by_column": has_empty_values_by_column,
+        "preview_row": serialize_tool_result(records[0], max_chars=2_000),
     }
 
 
@@ -808,6 +816,11 @@ def _format_dataframe_artifact_reference(
 
     return (
         "DataFrame result was saved as an artifact.\n\n"
+        "Схема загруженного из инстурмента dataframe: "
+        f"{serialize_tool_result(result_meta['column_types'], max_chars=4_000)}. "
+        f"название файла с datafrme  - {artifact.artifact_id}.csv. "
+        "Для того чтобы загрузить dataframe вы должны использовать инструмент - "
+        f"{artifact.metadata.get('tool_name') or ''}\n"
         "data_scope: dataframe_metadata_only\n"
         "full_result_available_in_artifact: true\n"
         "worker_disclosure_required: false\n"
@@ -823,6 +836,7 @@ def _format_dataframe_artifact_reference(
         f"column_count: {result_meta['column_count']}\n"
         f"columns: {serialize_tool_result(result_meta['columns'], max_chars=4_000)}\n"
         f"column_types: {serialize_tool_result(result_meta['column_types'], max_chars=4_000)}\n"
+        f"preview_row: {result_meta.get('preview_row') or ''}\n"
         f"has_empty_values: {str(result_meta['has_empty_values']).lower()}\n"
         "has_empty_values_by_column: "
         f"{serialize_tool_result(result_meta['has_empty_values_by_column'], max_chars=4_000)}\n"
@@ -847,6 +861,27 @@ def _build_variable_name(label: str) -> str:
     if safe[0].isdigit():
         safe = f"df_{safe}"
     return safe
+
+
+def _dataframe_preview_row(raw_result: Any) -> str:
+    """Возвращает одну строку preview для DataFrame-результата.
+
+    Args:
+        raw_result: DataFrame-подобный результат инструмента.
+
+    Returns:
+        JSON-строка первой записи или пустая строка, если preview недоступен.
+    """
+
+    try:
+        if getattr(raw_result, "empty", False):
+            return ""
+        records = raw_result.head(1).to_dict(orient="records")
+        if not records:
+            return ""
+        return serialize_tool_result(records[0], max_chars=2_000)
+    except Exception:
+        return ""
 
 
 def _dataframe_summary(result_meta: dict[str, Any]) -> str:

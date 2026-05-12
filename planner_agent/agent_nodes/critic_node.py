@@ -13,8 +13,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
+import re
 from typing import Any, Final
 
 from langchain_core.language_models import BaseChatModel
@@ -37,62 +37,17 @@ from ..structured_output import invoke_structured_output
 GOTO_VALIDATOR: Final[str] = "validator"
 GOTO_WORKER: Final[str] = "worker"
 CRITIC_NODE_TYPE: Final[str] = "worker_critic"
-MAX_CRITIC_RETRIES: Final[int] = 2
+MAX_CRITIC_RETRIES: Final[int] = 1
 MAX_TEXT_PREVIEW: Final[int] = 10_700
 MAX_WORKER_FULL_RESULT_CHARS: Final[int] = 300_000
 MAX_TOOL_TRACES: Final[int] = 8
 MAX_REACT_MESSAGE_TOOL_CALLS: Final[int] = 50
 MAX_ARTIFACTS: Final[int] = 12
-CONSOLE_BLOCK_MAX_LENGTH: Final[int] = 8_000
 # Артефакты prompt/tool trace пишутся в тот же artifact_index, что и данные worker-а;
 # их summary содержит копию system prompt — в critic их не показываем.
 _PROMPT_DIAGNOSTIC_ARTIFACT_ROLES: Final[frozenset[str]] = frozenset(
     {"prompt_trace", "prompt_payload", "tool_calls_trace"},
 )
-
-
-async def _print_content_block(title: str, content: str) -> None:
-    """Асинхронно выводит читаемый блок critic-диагностики в терминал.
-
-    Args:
-        title: Заголовок диагностического блока.
-        content: Текст блока. Длинный текст обрезается для читаемости.
-
-    Returns:
-        ``None``. Функция выполняет только консольный вывод.
-    """
-
-    text = (content or "").strip() or "(empty)"
-    if len(text) > CONSOLE_BLOCK_MAX_LENGTH:
-        text = f"{text[:CONSOLE_BLOCK_MAX_LENGTH]}\n...[truncated for console]..."
-    border = "=" * min(max(len(title), 16), 80)
-    await asyncio.to_thread(
-        print,
-        f"\n{border}\n{title}\n{border}\n{text}\n",
-        flush=True,
-    )
-
-
-def _format_critic_review(review: WorkerCriticReview) -> str:
-    """Форматирует ответ critic-модели для человекочитаемого вывода.
-
-    Args:
-        review: Структурированный ответ critic-узла.
-
-    Returns:
-        Многострочная строка с решением, проблемами и инструкциями.
-    """
-
-    lines = [
-        f"Approved: {review.approved}",
-        f"Reasoning: {review.reasoning}",
-    ]
-    if review.issues:
-        lines.append("Issues:")
-        lines.extend(f"- {item}" for item in review.issues)
-    if review.improvement_instructions:
-        lines.append(f"Improvement instructions: {review.improvement_instructions}")
-    return "\n".join(lines)
 
 
 async def critic_node(
@@ -149,11 +104,7 @@ async def critic_node(
             issues=[],
             improvement_instructions="",
         )
-
-    await _print_content_block(
-        f"CRITIC MODEL RESPONSE: task {task_id}",
-        _format_critic_review(review),
-    )
+    review = _sanitize_review_tool_references(review, available_tools)
 
     feedback = review.model_dump(mode="json")
     feedback["task_id"] = task_id
@@ -175,6 +126,7 @@ async def critic_node(
         human_prompt=human_prompt,
         payload={
             "task": task.model_dump(mode="json"),
+            "initial_user_query": payload.worker_payload.initial_user_query,
             "tool_traces": payload.tool_traces,
             "artifact_index": payload.artifact_index,
             "react_message_tool_calls": payload.react_message_tool_calls,
@@ -264,6 +216,49 @@ def _build_worker_retry_message(review: WorkerCriticReview) -> str:
     return "\n".join(lines)
 
 
+def _sanitize_review_tool_references(
+        review: WorkerCriticReview,
+        tools: list[BaseTool],
+) -> WorkerCriticReview:
+    """Удаляет из critic feedback имена недоступных инструментов.
+
+    Args:
+        review: Структурированный результат critic-а до нормализации.
+        tools: Список инструментов, реально доступных worker-у.
+
+    Returns:
+        Новый ``WorkerCriticReview`` без ссылок на инструменты, которых нет в
+        текущем списке ``tools``. Если доступные инструменты есть, подозрительные
+        tool-like имена заменяются первым доступным именем, чтобы retry не
+        планировал несуществующий tool.
+    """
+
+    available_names = [tool.name for tool in tools if getattr(tool, "name", "")]
+    if not available_names:
+        return review
+
+    replacement = available_names[0]
+
+    def sanitize_text(text: str) -> str:
+        result = str(text or "")
+        for token in set(re.findall(r"\b[A-Za-z][A-Za-z0-9_]*\b", result)):
+            looks_like_tool = token.startswith("spark_") or token.endswith("_tool")
+            if looks_like_tool and token not in available_names:
+                result = result.replace(token, replacement)
+        return result
+
+    return review.model_copy(
+        update={
+            "reasoning": sanitize_text(review.reasoning),
+            "issues": [sanitize_text(issue) for issue in review.issues],
+            "improvement_instructions": sanitize_text(
+                review.improvement_instructions
+            ),
+        },
+        deep=True,
+    )
+
+
 def _limit_critic_text(text: str, max_chars: int) -> str:
     """Ограничивает текст для critic prompt с явной пометкой.
 
@@ -338,9 +333,9 @@ def _build_worker_critic_human_prompt(
         [
             
             f"Task ID: {task.task_id}",
+            f"Исходный запрос пользователя:\n{worker_payload.initial_user_query or '(empty)'}",
             f"Описание задачи:\n{task.description}",
             f"Expected output:\n{task.expected_output or '(empty)'}",
-            f"Validation criteria:\n{json.dumps(task.validation_criteria, ensure_ascii=False)}",
             f"Dependency context:\n{json.dumps(worker_payload.dependency_context, ensure_ascii=False)[:MAX_TEXT_PREVIEW]}",
             f"Worker status: {task.status.value}",
             f"Worker answer source: {worker_answer_source}",
@@ -448,11 +443,13 @@ def _format_react_message_tool_calls_for_critic(
             args_str = str(args)
         if len(args_str) > MAX_TEXT_PREVIEW:
             args_str = f"{args_str[:MAX_TEXT_PREVIEW]}..."
+        result_text = str(rec.get("tool_result_preview") or "")
         lines.append(
             (
                 f"{i}. tool={rec.get('tool_name')}; "
                 f"tool_call_id={rec.get('tool_call_id')}; "
-                f"arguments={args_str}"
+                f"arguments={args_str}; "
+                f"result={result_text}"
             )
         )
     if len(records) > MAX_REACT_MESSAGE_TOOL_CALLS:
@@ -582,6 +579,7 @@ def _create_worker_critic_lineage(
         state={
             "run_id": run_id,
             "task": task.model_dump(mode="json"),
+            "initial_user_query": payload.worker_payload.initial_user_query,
             "critic_review": feedback,
             "artifact_index": payload.artifact_index,
             "tool_traces": payload.tool_traces,

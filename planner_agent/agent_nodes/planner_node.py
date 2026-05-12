@@ -34,13 +34,13 @@ GOTO_SCHEDULER: str = "scheduler"
 GOTO_RESPONDER: str = "responder"
 
 #: Максимальная длина превью результата / обоснования / лога ошибки.
-PREVIEW_MAX_LENGTH: int = 800
+PREVIEW_MAX_LENGTH: int = 50_000
 
 #: Максимальная длина блока, который выводится в терминал.
 CONSOLE_BLOCK_MAX_LENGTH: int = 8_000
 
 #: Максимальное количество попыток пересоставить план после review.
-PLAN_REVIEW_REVISION_ATTEMPTS: int = 1
+PLAN_REVIEW_REVISION_ATTEMPTS: int = 0
 
 #: Максимальное число полных skills, которые planner/replanner загружает
 #: перед составлением плана.
@@ -145,8 +145,6 @@ def _format_full_plan_response(full_plan: FullPlan) -> str:
         ]
         if task.expected_output:
             details.append(f"  expected_output: {task.expected_output}")
-        if task.validation_criteria:
-            details.append(f"  validation_criteria: {task.validation_criteria}")
         if task.suggested_tools:
             details.append(f"  suggested_tools: {task.suggested_tools}")
         if task.suggested_skills:
@@ -154,31 +152,6 @@ def _format_full_plan_response(full_plan: FullPlan) -> str:
         if task.config:
             details.append(f"  config: {task.config}")
         lines.extend(details)
-    return "\n".join(lines)
-
-
-def _format_plan_review(review: PlanReview) -> str:
-    """Форматирует критику плана в читаемую строку для терминала.
-
-    Args:
-        review: Структурированная критика плана.
-
-    Returns:
-        Многострочная строка с признаком revision, проблемами и рекомендацией.
-    """
-
-    lines = [
-        f"Needs revision: {review.needs_revision}",
-        f"Summary: {review.summary or '(empty)'}",
-    ]
-    if review.issues:
-        lines.append("Issues:")
-        lines.extend(f"- {item}" for item in review.issues)
-    if review.missing_steps:
-        lines.append("Missing steps:")
-        lines.extend(f"- {item}" for item in review.missing_steps)
-    if review.revision_guidance:
-        lines.append(f"Revision guidance: {review.revision_guidance}")
     return "\n".join(lines)
 
 
@@ -439,7 +412,7 @@ def _format_planner_loaded_skills(loaded_skills: dict[str, str]) -> str:
     blocks = [
         "<planner_loaded_skills>",
         "Используй эти skills при выборе источников, зависимостей, recovery-шагов, "
-        "validation criteria и suggested_skills. Skill не заменяет фактические "
+        "suggested_skills. Skill не заменяет фактические "
         "данные: если нужны значения, запланируй получение данных через tools, "
         "artifacts или sandbox.",
     ]
@@ -560,11 +533,7 @@ critic_feedback:
             schema=PlannerSkillSelection,
             messages=[SystemMessage(content=selection_prompt)],
         )
-    except Exception as exc:
-        await _print_content_block(
-            "PLANNER SKILL SELECTION SKIPPED",
-            f"Skill selection failed and planner will use index/previews only.\nError: {exc}",
-        )
+    except Exception:
         return {}
 
     loaded: dict[str, str] = {}
@@ -583,10 +552,6 @@ critic_feedback:
         if result.get("success") and isinstance(content, str) and content.strip():
             loaded[normalized_name] = content
 
-    await _print_content_block(
-        "PLANNER LOADED SKILLS",
-        "\n".join(loaded) if loaded else "(none)",
-    )
     return loaded
 
 
@@ -670,7 +635,7 @@ def _format_execution_results(plan: dict[str, Task]) -> str:
         if display_preview:
             # Ограничиваем превью константой для единообразия
             line += (
-                f" | Превью результата (первые {PREVIEW_MAX_LENGTH} символов)"
+                f" | Результат"
                 f"={display_preview[:PREVIEW_MAX_LENGTH]}"
             )
 
@@ -866,7 +831,6 @@ def build_full_plan(
             description=description,
             dependencies=dependencies,
             expected_output=planned_task.expected_output,
-            validation_criteria=planned_task.validation_criteria,
             suggested_tools=planned_task.suggested_tools,
             suggested_skills=planned_task.suggested_skills,
             required_artifacts=planned_task.required_artifacts,
@@ -935,14 +899,9 @@ async def _review_and_revise_plan(
             schema=PlanReview,
             messages=[SystemMessage(content=review_prompt)],
         )
-    except Exception as exc:
-        await _print_content_block(
-            "PLAN REVIEW SKIPPED",
-            f"Plan review failed and candidate plan will be used as is.\nError: {exc}",
-        )
+    except Exception:
         return full_plan
 
-    await _print_content_block("PLAN REVIEW", _format_plan_review(review))
     if not review.needs_revision:
         return full_plan
 
@@ -962,11 +921,7 @@ async def _review_and_revise_plan(
                 _format_full_plan_response(revised_plan),
             )
             return revised_plan
-        except Exception as exc:
-            await _print_content_block(
-                "PLAN REVISION FAILED",
-                f"Revision failed and candidate plan will be used as is.\nError: {exc}",
-            )
+        except Exception:
             return full_plan
 
     return revised_plan

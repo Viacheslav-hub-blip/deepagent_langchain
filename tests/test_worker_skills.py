@@ -116,7 +116,6 @@ class WorkerSkillLoadingTests(unittest.TestCase):
                         suggested_skills=["insight-design"],
                         suggested_tools=["show_current_dataframe"],
                         required_artifacts=["worker result"],
-                        validation_criteria=["Uses evidence"],
                     )
                 ],
             ),
@@ -127,7 +126,6 @@ class WorkerSkillLoadingTests(unittest.TestCase):
         self.assertEqual(task.suggested_skills, ["insight-design"])
         self.assertEqual(task.suggested_tools, ["show_current_dataframe"])
         self.assertEqual(task.required_artifacts, ["worker result"])
-        self.assertEqual(task.validation_criteria, ["Uses evidence"])
 
     def test_worker_loads_full_skill_content_and_adds_it_to_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -148,7 +146,6 @@ class WorkerSkillLoadingTests(unittest.TestCase):
                 suggested_skills=["insight-design", "missing-skill"],
                 suggested_tools=["workspace_read_file"],
                 expected_output="Insight with evidence references.",
-                validation_criteria=["Cites artifact_id"],
                 required_artifacts=["dataset export"],
             )
             loaded = _load_task_skills(task, SkillsService(tmp))

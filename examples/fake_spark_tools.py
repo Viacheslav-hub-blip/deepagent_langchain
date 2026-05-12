@@ -347,8 +347,12 @@ def _get_table_registry() -> dict[str, dict[str, str]]:
     return {
         "hits": {"file": HITS_FILE},
         "hits_extra_info": {"file": HITS_FILE},
+        "cspfs_repo_features3.hits_extra_info_129372427_view": {"file": HITS_FILE},
+        "hits_extra_info_129372427_view": {"file": HITS_FILE},
         "uko_event": {"file": UKO_FILE},
+        "csp_afpc_sss_inc.uko_event": {"file": UKO_FILE},
         "cards_event": {"file": CARDS_FILE},
+        "csp_afpc_sss_inc.cards_event": {"file": CARDS_FILE},
         "history_automarking": {"file": HISTORY_AUTOMARKING_FILE},
         "demo_client_timeline": {"file": DEMO_TIMELINE_FILE},
         "source_1": {"file": SOURCE_1_FILE},

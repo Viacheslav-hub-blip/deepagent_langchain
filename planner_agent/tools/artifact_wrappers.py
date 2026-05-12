@@ -4,6 +4,14 @@
 - ArtifactToolWrapper: wrapper над обычным LangChain tool.
 - wrap_tools_for_artifacts: массовое оборачивание tools для worker.
 - _clean_runtime_kwargs: удаление runtime-only kwargs.
+- _format_tool_success_response: единый понятный ответ LLM для успешного вызова.
+- _build_tool_error_payload: диагностический JSON для ошибки инструмента.
+- _tool_error_possible_causes: вероятные причины ошибки инструмента.
+- _tool_error_solution_options: варианты исправления ошибки инструмента.
+- _format_tool_error_trace_content: текст trace artifact для ошибки.
+- _json_text: сериализация JSON-ответа инструмента.
+- _limited_serialized: компактная сериализация аргументов/результатов.
+- _limit_tool_text: обрезка диагностического текста инструмента.
 - _tool_input_from_call: восстановление входа tool из args/kwargs.
 - _safe_filename_fragment: безопасный фрагмент имени файла.
 - _build_artifact_label: формирование человеко-читаемого id artifact-а вызова.
@@ -16,6 +24,7 @@
 from __future__ import annotations
 
 import re
+import traceback
 from typing import Any
 from uuid import uuid4
 
@@ -33,6 +42,8 @@ from ..schemas.artifacts import Artifact
 from ..services.artifact_service import ArtifactService
 
 TOOL_ARTIFACT_SUMMARY_MAX_LEN = 500
+TOOL_ERROR_TRACEBACK_MAX_LEN = 8_000
+INLINE_TOOL_RESULT_MAX_CHARS = 8_000
 
 # Префиксы инструментов, которые читают существующие artifacts/skills и не должны
 # создавать собственные artifact-записи. Их вызовы покрываются tool-calls trace
@@ -123,7 +134,10 @@ class ArtifactToolWrapper(BaseTool):
 
         clean_kwargs = _clean_runtime_kwargs(kwargs)
         tool_input = _tool_input_from_call(args, clean_kwargs)
-        result = self._wrapped_tool.invoke(tool_input)
+        try:
+            result = self._wrapped_tool.invoke(tool_input)
+        except Exception as exc:
+            return self._record_tool_exception(tool_input=tool_input, exc=exc)
         return self._record_tool_result(tool_input=tool_input, result=result)
 
     async def _arun(self, *args: Any, **kwargs: Any) -> Any:
@@ -139,7 +153,10 @@ class ArtifactToolWrapper(BaseTool):
 
         clean_kwargs = _clean_runtime_kwargs(kwargs)
         tool_input = _tool_input_from_call(args, clean_kwargs)
-        result = await self._wrapped_tool.ainvoke(tool_input)
+        try:
+            result = await self._wrapped_tool.ainvoke(tool_input)
+        except Exception as exc:
+            return self._record_tool_exception(tool_input=tool_input, exc=exc)
         return await self._record_tool_result_async(tool_input=tool_input, result=result)
 
     def _record_tool_result(self, *, tool_input: Any, result: Any) -> Any:
@@ -191,7 +208,11 @@ class ArtifactToolWrapper(BaseTool):
             tool_input=tool_input,
             captured=captured,
         )
-        return captured.content_for_llm
+        return _format_tool_success_response(
+            tool_name=self.name,
+            tool_input=tool_input,
+            captured=captured,
+        )
 
     async def _record_tool_result_async(self, *, tool_input: Any, result: Any) -> Any:
         """Асинхронно записывает tool trace и добавляет DataFrame в sandbox.
@@ -242,7 +263,90 @@ class ArtifactToolWrapper(BaseTool):
             tool_input=tool_input,
             captured=captured,
         )
-        return captured.content_for_llm
+        return _format_tool_success_response(
+            tool_name=self.name,
+            tool_input=tool_input,
+            captured=captured,
+        )
+
+    def _record_tool_exception(self, *, tool_input: Any, exc: Exception) -> str:
+        """Записывает ошибку инструмента и возвращает понятный ответ для LLM.
+
+        Args:
+            tool_input: Аргументы вызова инструмента.
+            exc: Исключение, возникшее внутри исходного инструмента.
+
+        Returns:
+            JSON-строка с описанием ошибки, контекстом и вариантами исправления.
+        """
+
+        trace_id = uuid4().hex
+        self._call_counter += 1
+        trace_label = _build_artifact_label(
+            task_id=self._task.task_id,
+            retry_count=self._task.retry_count,
+            tool_name=self.name,
+            sequence=self._call_counter,
+            suffix="error_trace",
+        )
+        error_payload = _build_tool_error_payload(
+            tool_name=self.name,
+            tool_input=tool_input,
+            exc=exc,
+        )
+        content = _format_tool_error_trace_content(
+            tool_name=self.name,
+            tool_input=tool_input,
+            error_payload=error_payload,
+        )
+        artifact = self._artifact_service.write_artifact(
+            run_id=self._run_id,
+            node_id=self._node_id,
+            kind="tool_trace",
+            filename=(
+                f"tasks/{_safe_filename_fragment(self._task.task_id or 'unknown_task')}"
+                f"/tool_calls/{_safe_filename_fragment(self.name)}-{trace_id}-error.txt"
+            ),
+            content=content,
+            mime_type="text/plain",
+            summary=str(error_payload["error"])[:TOOL_ARTIFACT_SUMMARY_MAX_LEN],
+            metadata={
+                "trace_id": trace_id,
+                "task_id": self._task.task_id,
+                "tool_name": self.name,
+                "args_preview": serialize_tool_result(
+                    tool_input,
+                    max_chars=TOOL_ARTIFACT_SUMMARY_MAX_LEN,
+                ),
+                "artifact_role": "tool_call_trace",
+                "captured": False,
+                "tool_error": True,
+                "reusable": False,
+            },
+            artifact_id=trace_label,
+        )
+        self._artifact_index[artifact.artifact_id] = artifact.model_dump(mode="json")
+        self._tool_traces.append(
+            {
+                "trace_id": trace_id,
+                "run_id": self._run_id,
+                "node_id": self._node_id,
+                "task_id": self._task.task_id,
+                "tool_name": self.name,
+                "args_preview": serialize_tool_result(
+                    tool_input,
+                    max_chars=TOOL_ARTIFACT_SUMMARY_MAX_LEN,
+                ),
+                "result_preview": str(error_payload["error"])[:TOOL_ARTIFACT_SUMMARY_MAX_LEN],
+                "artifact_id": artifact.artifact_id,
+                "artifact_uri": artifact.uri,
+                "captured": False,
+                "tool_error": True,
+            }
+        )
+        error_payload["tool_trace_artifact_id"] = artifact.artifact_id
+        error_payload["tool_trace_uri"] = artifact.uri
+        return _json_text(error_payload)
 
     def _write_trace_artifact(
             self,
@@ -483,6 +587,231 @@ def _clean_runtime_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         for key, value in kwargs.items()
         if key not in {"run_manager", "callbacks", "config"}
     }
+
+
+def _format_tool_success_response(
+        *,
+        tool_name: str,
+        tool_input: Any,
+        captured: Any,
+) -> Any:
+    """Формирует понятный ответ инструмента для LLM.
+
+    Args:
+        tool_name: Имя вызванного инструмента.
+        tool_input: Аргументы инструмента.
+        captured: Результат перехвата output, созданный ``capture_tool_result``.
+
+    Returns:
+        Специальный artifact/DataFrame ответ или JSON-строка с inline-результатом.
+    """
+
+    if captured.was_captured:
+        return captured.content_for_llm
+    if captured.artifact_refs:
+        return _json_text(
+            {
+                "ok": True,
+                "tool_name": tool_name,
+                "what_happened": (
+                    "Инструмент успешно вернул структурированный результат. "
+                    "Результат также сохранен как artifact для последующего чтения."
+                ),
+                "tool_input": _limited_serialized(tool_input),
+                "result": captured.content_for_llm,
+                "result_preview": captured.preview,
+                "artifact_refs": captured.artifact_refs,
+                "result_kind": captured.result_kind,
+                "next_steps": [
+                    "Используй inline result, если его достаточно для текущей задачи.",
+                    "Если нужен полный файл или проверка данных, прочитай artifact через artifact tools.",
+                    "В ответе укажи artifact_id, если вывод опирается на сохраненный результат.",
+                ],
+            }
+        )
+    return _json_text(
+        {
+            "ok": True,
+            "tool_name": tool_name,
+            "what_happened": "Инструмент успешно выполнился и вернул небольшой inline-результат.",
+            "tool_input": _limited_serialized(tool_input),
+            "result": captured.content_for_llm,
+            "result_preview": captured.preview,
+            "result_kind": captured.result_kind,
+            "next_steps": [
+                "Используй result как фактический вывод инструмента.",
+                "Если result недостаточен для задачи, вызови подходящий инструмент с более точными аргументами.",
+                "Если нужны вычисления по result, сохрани его в переменную или используй python_analysis.",
+            ],
+        }
+    )
+
+
+def _build_tool_error_payload(
+        *,
+        tool_name: str,
+        tool_input: Any,
+        exc: Exception,
+) -> dict[str, Any]:
+    """Собирает диагностический payload ошибки инструмента.
+
+    Args:
+        tool_name: Имя инструмента, который завершился ошибкой.
+        tool_input: Аргументы вызова инструмента.
+        exc: Исключение исходного инструмента.
+
+    Returns:
+        JSON-совместимый словарь с причиной ошибки и вариантами исправления.
+    """
+
+    error_type = exc.__class__.__name__
+    error_message = str(exc)
+    return {
+        "ok": False,
+        "tool_name": tool_name,
+        "what_happened": "Инструмент не смог выполнить запрос и вернул ошибку.",
+        "error": {
+            "type": error_type,
+            "message": error_message,
+        },
+        "tool_input": _limited_serialized(tool_input),
+        "possible_causes": _tool_error_possible_causes(error_type, error_message),
+        "solution_options": _tool_error_solution_options(tool_name, error_type, error_message),
+        "retry_guidance": (
+            "Не повторяй тот же вызов без изменений. Сначала исправь аргументы, "
+            "проверь доступные файлы/переменные/artifacts или выбери другой инструмент."
+        ),
+        "traceback": _limit_tool_text(traceback.format_exc(), max_chars=TOOL_ERROR_TRACEBACK_MAX_LEN),
+    }
+
+
+def _tool_error_possible_causes(error_type: str, error_message: str) -> list[str]:
+    """Возвращает вероятные причины ошибки инструмента.
+
+    Args:
+        error_type: Тип исключения.
+        error_message: Текст исключения.
+
+    Returns:
+        Список человекочитаемых причин для LLM.
+    """
+
+    text = f"{error_type}: {error_message}".lower()
+    causes: list[str] = []
+    if "not found" in text or "filenotfound" in text:
+        causes.append("Указанный файл, artifact, таблица или переменная не найдены.")
+    if "outside allowed roots" in text or "permission" in text:
+        causes.append("Запрошенный путь недоступен из текущего workspace или запрещен политикой доступа.")
+    if "unsupported" in text:
+        causes.append("Формат входных данных или файла не поддерживается этим инструментом.")
+    if "missing" in text or "keyerror" in text:
+        causes.append("В аргументах или данных отсутствует обязательное поле/колонка/ключ.")
+    if "valueerror" in text:
+        causes.append("Один из аргументов имеет недопустимое значение или формат.")
+    if not causes:
+        causes.append("Инструмент получил некорректные аргументы или столкнулся с внутренней ошибкой выполнения.")
+    return causes
+
+
+def _tool_error_solution_options(
+        tool_name: str,
+        error_type: str,
+        error_message: str,
+) -> list[str]:
+    """Возвращает варианты исправления ошибки инструмента.
+
+    Args:
+        tool_name: Имя инструмента.
+        error_type: Тип исключения.
+        error_message: Текст исключения.
+
+    Returns:
+        Список практических действий для следующего шага модели.
+    """
+
+    text = f"{error_type}: {error_message}".lower()
+    options = [
+        "Проверь точные имена доступных переменных, файлов и artifacts перед повтором.",
+        "Повтори вызов только после изменения аргументов на основе сообщения об ошибке.",
+    ]
+    if "not found" in text or "filenotfound" in text:
+        options.append("Вызови list/get инструмент для доступных файлов, таблиц или artifacts и выбери существующее имя.")
+    if "unsupported" in text:
+        options.append("Используй поддерживаемый формат или другой инструмент, подходящий для этого типа данных.")
+    if "outside allowed roots" in text or "permission" in text:
+        options.append("Используй путь внутри разрешенного workspace или sources/contexts директории.")
+    if "python" in tool_name.lower():
+        options.append("Исправь код и повтори python_analysis с тем же target_variable, если результат все еще нужен.")
+    else:
+        options.append("Если инструмент не подходит под задачу, выбери другой доступный tool из prompt.")
+    return options
+
+
+def _format_tool_error_trace_content(
+        *,
+        tool_name: str,
+        tool_input: Any,
+        error_payload: dict[str, Any],
+) -> str:
+    """Формирует текст trace artifact для ошибки инструмента.
+
+    Args:
+        tool_name: Имя инструмента.
+        tool_input: Аргументы инструмента.
+        error_payload: JSON-совместимое описание ошибки.
+
+    Returns:
+        Текстовый trace с аргументами и диагностикой.
+    """
+
+    return (
+        f"Tool: {tool_name}\n\n"
+        f"Arguments:\n{serialize_tool_result(tool_input, max_chars=TOOL_ARTIFACT_SUMMARY_MAX_LEN)}\n\n"
+        f"Error response:\n{_json_text(error_payload)}"
+    )
+
+
+def _json_text(payload: dict[str, Any]) -> str:
+    """Сериализует payload в читаемый JSON для ToolMessage.
+
+    Args:
+        payload: JSON-совместимый словарь.
+
+    Returns:
+        Строка JSON без ASCII-экранирования.
+    """
+
+    return serialize_tool_result(payload, max_chars=None)
+
+
+def _limited_serialized(value: Any) -> str:
+    """Сериализует значение с ограничением длины для диагностического ответа.
+
+    Args:
+        value: Произвольное значение.
+
+    Returns:
+        Короткая JSON/text строка.
+    """
+
+    return serialize_tool_result(value, max_chars=INLINE_TOOL_RESULT_MAX_CHARS)
+
+
+def _limit_tool_text(value: str, *, max_chars: int) -> str:
+    """Обрезает диагностический текст инструмента.
+
+    Args:
+        value: Исходный текст.
+        max_chars: Максимальная длина результата.
+
+    Returns:
+        Текст с пометкой об обрезании при превышении лимита.
+    """
+
+    text = str(value or "")
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}...[truncated]"
 
 
 def _tool_input_from_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:

@@ -32,6 +32,12 @@ class PlannerLineageTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             FullPlan(objective="Analyze case")
 
+    def test_planned_task_rejects_text_task_id(self) -> None:
+        """Проверяет, что задача в плане принимает только числовой task_id."""
+
+        with self.assertRaises(ValidationError):
+            PlannedTask(task_id="load_source", description="Inspect source data")
+
     def test_planner_creates_plan_created_node(self) -> None:
         """Проверяет, что planner создает plan_created node."""
 

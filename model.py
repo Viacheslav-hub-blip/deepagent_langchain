@@ -1,3 +1,12 @@
+"""Конфигурация моделей LangChain для локальных запусков агента.
+
+Содержит:
+- model: ChatOpenAI-клиент OpenRouter для основного research-agent.
+- embeddings: OpenAIEmbeddings-клиент OpenRouter для эмбеддингов.
+- gigachat: GigaChat-клиент для ручных экспериментов.
+- get_answer: простой helper для вызова prompt-template через выбранную модель.
+"""
+
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -13,10 +22,12 @@ model = ChatOpenAI(
     # model="qwen/qwen3.5-397b-a17b",
     # google/gemini-3-pro-preview
     #model="google/gemini-2.5-flash",
-    model="google/gemini-3-flash-preview",
-    #model="google/gemini-2.5-flash",
+    #model="deepseek/deepseek-v4-flash",
+    model="google/gemini-2.5-flash",
     # model="kwaipilot/kat-coder-pro:free",
-    temperature=0.1
+    temperature=0.1,
+    timeout=120,
+    max_retries=0,
 )
 
 embeddings = OpenAIEmbeddings(
@@ -36,13 +47,24 @@ embeddings = OpenAIEmbeddings(
 
 gigachat  = GigaChat(
     credentials="ZTk3ZjdmYjMtNmMwOC00NGE1LTk0MzktYzA3ZjU4Yzc2YWI3OmY5YmQwYjEzLTE0MDctNGNhOC1iYmViLTA1YjlkNTk3OTA0Yg==",
-    model="GigaChat-2",
+    model="GigaChat-2-Max",
     verify_ssl_certs=False,
 )
 
 ""
 
 def get_answer(prompt: str, model, prompt_params: dict = None) -> str:
+    """Возвращает текстовый ответ модели на prompt-template.
+
+    Args:
+        prompt: Шаблон пользовательского или системного prompt.
+        model: LangChain chat model, через которую выполняется запрос.
+        prompt_params: Параметры для подстановки в шаблон prompt.
+
+    Returns:
+        Строковый ответ модели после применения StrOutputParser.
+    """
+
     if prompt_params is None:
         prompt_params = {}
     chain = ChatPromptTemplate.from_template(prompt) | model | StrOutputParser()

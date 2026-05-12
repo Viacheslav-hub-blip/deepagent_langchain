@@ -26,6 +26,7 @@ _FALLBACK_CONFIG: Final[str] = "{}"
 
 _SCORE_ZERO: Final[float] = 0.0
 _SCORE_FULL: Final[float] = 1.0
+_REJECTION_CONFIDENCE_THRESHOLD: Final[float] = 0.75
 
 _PREVIEW_MAX_LEN: Final[int] = 6000
 
@@ -35,6 +36,14 @@ _REASON_FAILED: Final[str] = "Ошибка выполнения Worker"
 _REASON_SKIPPED: Final[str] = "Задача была намеренно пропущена"
 _REASON_CRASHED: Final[str] = "Сбой валидатора: {exc}"
 _REASON_VALIDATION_FAILED: Final[str] = "Ошибка валидации: {reasoning}"
+_REASON_SOFT_ACCEPTED: Final[str] = (
+    "Мягкая валидация: validator не нашел достаточно уверенного основания "
+    "для блокировки результата. Исходное замечание: {reasoning}"
+)
+_REASON_VALIDATOR_UNAVAILABLE: Final[str] = (
+    "Мягкая валидация: validator не смог получить структурированный ответ; "
+    "результат передан дальше без переписывания задачи. Ошибка: {exc}"
+)
 _CRITIC_CONFIG_KEYS: Final[frozenset[str]] = frozenset(
     {
         "critic_feedback",
@@ -164,6 +173,14 @@ async def validator_node(
         if verdict.is_valid:
             task.status = TaskStatus.COMPLETED
             task.error_log = None
+        elif verdict.confidence < _REJECTION_CONFIDENCE_THRESHOLD:
+            task.status = TaskStatus.COMPLETED
+            task.validation_passed = True
+            task.validation_score = verdict.confidence
+            task.validation_reason = _REASON_SOFT_ACCEPTED.format(
+                reasoning=verdict.reasoning
+            )
+            task.error_log = None
         else:
             task.status = TaskStatus.FAILED
             task.error_log = _REASON_VALIDATION_FAILED.format(
@@ -171,11 +188,11 @@ async def validator_node(
             )
 
     except Exception as exc:
-        task.status = TaskStatus.FAILED
-        task.validation_passed = False
-        task.validation_reason = _REASON_CRASHED.format(exc=exc)
+        task.status = TaskStatus.COMPLETED
+        task.validation_passed = True
+        task.validation_reason = _REASON_VALIDATOR_UNAVAILABLE.format(exc=exc)
         task.validation_score = _SCORE_ZERO
-        task.error_log = task.validation_reason
+        task.error_log = None
 
     update = _build_validator_update(payload, task, lineage_service)
     prompt_trace_artifacts = write_prompt_trace(

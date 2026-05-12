@@ -154,7 +154,7 @@ critic_feedback:
       memory snapshot, индекс skills, filesystem context, previews доступных
       sandbox-переменных и previews релевантных skills.
    3. Planner создает FullPlan: граф узких проверяемых задач с зависимостями,
-      expected output, validation criteria, suggested tools/skills и config.
+      expected output, suggested tools/skills и config.
    4. Scheduler выбирает ready-задачи, собирает для worker-а контекст задачи,
       artifact context и транзитивный dependency context по всей цепочке
       зависимостей.
@@ -164,7 +164,7 @@ critic_feedback:
    6. Critic проверяет результат worker-а перед validator и может вернуть
       эту же задачу worker-у на доработку максимум два раза.
    7. Validator проверяет, соответствует ли результат worker-а задаче, данным,
-      tool output, artifacts и validation criteria.
+      tool output и artifacts.
    8. Replanner обновляет план: сохраняет успешные задачи, не перезапускает
       failed-задачи без новой стратегии, создает retry/replacement задачи с
       новыми task_id и завершает план, когда responder уже может ответить.
@@ -174,6 +174,9 @@ critic_feedback:
    Следствие для replanner:
    ты проектируешь создаешь следующие шаги плана и редактируешь существующие, а не выполняешь анализ сам.
    Если данных уже достаточно, отметь все задачи выполненными
+   Если есть failed dependency, используй replacement/recovery с новым task_id.
+   Не считай цель достигнутой, пока ошибка зависимости не заменена результатом
+   или явно не зафиксирована как ограничение для responder.
    </agent_architecture>
    
    <task>
@@ -250,6 +253,8 @@ critic_feedback:
    2. Не добавляй markdown fences.
    3. Не используй префикс ```json.
    4. Не добавляй пояснения до или после JSON.
+   5. task_id каждой задачи должен быть числом, например 1, 2, 3.
+   6. dependencies должны содержать только числовые task_id существующих предыдущих задач.
     </output_rules>
    
    
@@ -362,8 +367,6 @@ critic_feedback:
 Expected output:
 "Preview source_1.csv, список колонок, типы колонок, подтверждение наличия или отсутствия epk_id, score, answer_text, question_number."
 
-Validation criteria:
-- Указан файл source_1.csv.
 - Указаны найденные колонки.
 - Явно сказано, есть ли epk_id.
 - Явно сказано, есть ли score.
@@ -375,8 +378,6 @@ Validation criteria:
 Expected output:
 "Preview source_2.csv, список колонок, типы колонок, подтверждение наличия или отсутствия epk_id, segment, rule_name."
 
-Validation criteria:
-- Указан файл source_2.csv.
 - Указаны найденные колонки.
 - Явно сказано, есть ли epk_id.
 - Явно сказано, есть ли segment.
@@ -388,8 +389,6 @@ Validation criteria:
 Expected output:
 "Техническое решение: можно или нельзя объединять source_1.csv и source_2.csv по epk_id; какие колонки использовать дальше."
 
-Validation criteria:
-- Использованы только preview-результаты.
 - Указано наличие epk_id в обоих источниках.
 - Указано наличие score в source_1.csv.
 - Указано наличие segment в source_2.csv.
@@ -434,8 +433,6 @@ Validation criteria:
 Expected output:
 "Выбранный источник клиентских событий: cards_event или uko_event; список полей из df_hit_case/art_hit_case_001, на основе которых сделан выбор."
 
-Validation criteria:
-- Использован artifact_id=art_hit_case_001.
 - Использованы event_channel=card_acquiring, surface=POS, product=Карта.
 - Источник выбран явно.
 - На этом шаге не выполнена выгрузка событий.
@@ -446,8 +443,6 @@ Validation criteria:
 Expected output:
 "DataFrame df_client_hits_180d/artifact с историей сработок epk_id=782341905 за 2024-10-19 — 2025-04-16."
 
-Validation criteria:
-- Использован epk_id=782341905.
 - Использовано окно 2024-10-19 — 2025-04-16.
 - Текущая дата сработки 2025-04-17 не включена в lookback, если задача именно про предыдущие 180 дней.
 - Если сработок нет, это явно указано.
@@ -459,8 +454,6 @@ Validation criteria:
 Expected output:
 "DataFrame df_client_card_events_window/artifact с карточными событиями epk_id=782341905 за 2025-04-14 — 2025-04-20."
 
-Validation criteria:
-- Использован epk_id=782341905.
 - Использовано окно 2025-04-14 — 2025-04-20.
 - Использован источник cards_event, а не uko_event.
 - В результате явно указано количество найденных событий.
@@ -473,8 +466,6 @@ Validation criteria:
 Expected output:
 "Фактический разбор: текущая сработка, история сработок за 180 дней, события вокруг 2025-04-17, подтвержденные паттерны, ограничения."
 
-Validation criteria:
-- Использованы только перечисленные DataFrame/artifacts.
 - Все выводы привязаны к конкретным данным.
 - Нет вывода о знакомости получателя, если это не проверено историей.
 - Нет финального пользовательского отчета.
@@ -516,8 +507,6 @@ Validation criteria:
 Хорошая формулировка T2:
 "Выгрузить карточные события клиента из cards_event для epk_id=55001122 за дату сработки event_dt=2025-03-12 и окно ±3 дня: с 2025-03-09 включительно по 2025-03-15 включительно. Использовать данные сработки из df_hit_case/artifact_id=art_hit_case_777: event_id=e7b2-9911, event_channel=card_emission, surface=E-commerce, product=Карта. Не использовать uko_event. Вернуть события с полями event_dt/event_time, amount, merchant, operation_type, card/token identifiers при наличии. Сохранить как df_card_events_e7b2_9911 и artifact kind=dataset."
 
-Validation criteria:
-- Использован epk_id=55001122.
 - Использовано окно 2025-03-09 — 2025-03-15.
 - Использован cards_event.
 - uko_event не используется.
@@ -558,8 +547,6 @@ Validation criteria:
 Хорошая формулировка terminal-задачи, если схема требует задачу:
 "Зафиксировать невозможность дальнейшего разбора сработки event_id=abc-123. Использовать результат T1: df_hit_case пустой, artifact_id=art_empty_hit_001, epk_id отсутствует, event_dt отсутствует, event_channel отсутствует. Не планировать выгрузку клиентских событий и историю сработок, потому что идентификатор клиента epk_id и дата event_dt не определены. Вернуть техническое ограничение для responder_node."
 
-Validation criteria:
-- Указан event_id=abc-123.
 - Указан artifact_id=art_empty_hit_001.
 - Явно указано, что epk_id отсутствует.
 - Явно указано, что event_dt отсутствует.
@@ -599,8 +586,6 @@ Validation criteria:
 Expected output:
 "df_client_transactions_clean/artifact с очищенными транзакциями; отчет о пропусках transaction_amount, дублях operation_id и строках вне окна."
 
-Validation criteria:
-- Использован artifact_id=art_client_txn_window_001.
 - Использован epk_id=44332211.
 - Проверено окно 2025-01-10 — 2025-01-16.
 - Проверены transaction_amount, operation_id, event_dt.
@@ -653,7 +638,7 @@ Validation criteria:
 3. Scheduler выбирает ready-задачи и передает worker-у только релевантный контекст.
 4. Worker выполняет одну конкретную задачу: получает данные, читает artifacts, выполняет вычисления в sandbox, создает переменные, файлы, таблицы, графики или промежуточные результаты.
 5. Critic проверяет результат worker-а перед validator и может вернуть задачу worker-у на доработку максимум два раза.
-6. Validator проверяет результат worker-а относительно задачи, данных, tool output, artifacts и validation criteria.
+6. Validator проверяет результат worker-а относительно задачи, данных, tool output и artifacts.
 7. Replanner обновляет план: сохраняет полезные результаты, заменяет неудачные шаги новой стратегией и завершает план, когда responder уже может ответить.
 8. Responder формирует финальный отчет пользователю только по выполненным задачам, artifacts и ограничениям.
 
@@ -699,6 +684,7 @@ Validation criteria:
 4. Используй artifacts вместо повторных дорогих выгрузок, если artifact покрывает нужные данные.
 5. Если данных не хватает, сначала запланируй их получение или чтение.
 6. Если осталась только интерпретация собранных результатов, не добавляй worker-задачу: это сделает responder.
+7. task_id каждой задачи должен быть числом; dependencies должны ссылаться на числовые task_id предыдущих задач.
 </planning_principles>
 
 <planning_algorithm>
@@ -840,7 +826,7 @@ Validation criteria:
 - Не добавлять задачу «показать график» или «написать вывод»: это сделает responder_node.
 
 Пример правильной структуры задачи:
-- task_id: calc_daily_amount_distribution
+- task_id: 1
 - description: На основе transactions_df рассчитать дневную агрегацию сумм операций за период 2026-04-01 — 2026-04-30 и построить график распределения суммы операций по дням.
 - dependencies: []
 - input_variables:
@@ -855,8 +841,6 @@ Validation criteria:
   - figure daily_amount_distribution_fig.
 - output_artifacts:
   - не требуется, если пользователь не просил файл.
-- validation_criteria:
-  - transactions_df используется из available_variables;
   - повторная выгрузка не выполняется;
   - данные отфильтрованы на период 2026-04-01 — 2026-04-30;
   - проверены колонки operation_date и amount_rub;
@@ -911,7 +895,7 @@ Validation criteria:
 - Не ставить новую задачу в зависимость от failed-задачи, если ее результат непригоден.
 
 Пример правильной структуры задачи:
-- task_id: retry_calc_top_recipients_from_artifact
+- task_id: 3
 - description: Используя полный artifact transactions_march_2026_artifact, рассчитать топ-10 получателей по сумме операций за период 2026-03-01 — 2026-03-31 с корректными колонками amount_rub и recipient_name.
 - dependencies:
   - успешная задача, создавшая transactions_march_2026_artifact, если она есть в current_plan.
@@ -930,8 +914,6 @@ Validation criteria:
     - last_operation_date.
 - output_artifacts:
   - top_recipients_march_2026_artifact, если artifact-система поддерживает сохранение результата.
-- validation_criteria:
-  - данные прочитаны из полного artifact, а не из preview;
   - повторная выгрузка транзакций не выполнялась;
   - используется amount_rub, а не transaction_sum;
   - используется recipient_name для группировки;
@@ -992,7 +974,7 @@ Validation criteria:
 Пример правильной структуры задач:
 
 Задача 1:
-- task_id: load_trigger_case
+- task_id: 1
 - description: Получить запись антифрод-сработки по event_id = f9246b19-3bf5-4883-8076-d1d4356a6cf8.
 - dependencies: []
 - input_variables: []
@@ -1004,8 +986,6 @@ Validation criteria:
   - dataframe или structured result trigger_case_df.
 - output_artifacts:
   - trigger_case_artifact, если результат сохраняется как artifact.
-- validation_criteria:
-  - результат не пустой;
   - содержит event_id = f9246b19-3bf5-4883-8076-d1d4356a6cf8;
   - содержит epk_id или явно диагностирует его отсутствие;
   - содержит event_dt или явно диагностирует его отсутствие.
@@ -1013,10 +993,10 @@ Validation criteria:
   - spark_get_trigger_case_by_event_id.
 
 Задача 2:
-- task_id: extract_trigger_context
+- task_id: 2
 - description: Извлечь из trigger_case_df ключевые параметры сработки и подготовить resolved values для следующих задач.
 - dependencies:
-  - load_trigger_case
+  - 1
 - input_variables:
   - trigger_case_df, если worker сохранил переменную.
 - input_artifacts:
@@ -1042,8 +1022,6 @@ Validation criteria:
     - trigger_rule.
 - output_artifacts:
   - trigger_context_artifact, если structured context сохраняется.
-- validation_criteria:
-  - epk_id извлечен или отсутствие явно объяснено;
   - event_dt извлечен или отсутствие явно объяснено;
   - trigger_day_start и trigger_day_end рассчитаны из event_dt;
   - lookback_start и lookback_end рассчитаны из event_dt;
@@ -1053,10 +1031,10 @@ Validation criteria:
   - sandbox/code execution.
 
 Задача 3:
-- task_id: load_client_trigger_history_180d
+- task_id: 3
 - description: Получить историю антифрод-сработок клиента за 180 дней до даты рассматриваемой сработки.
 - dependencies:
-  - extract_trigger_context
+  - 2
 - input_variables:
   - trigger_context.
 - input_artifacts:
@@ -1070,8 +1048,6 @@ Validation criteria:
   - dataframe client_trigger_history_180d_df.
 - output_artifacts:
   - client_trigger_history_180d_artifact.
-- validation_criteria:
-  - используется trigger_epk_id из extract_trigger_context;
   - используется lookback_start и lookback_end из extract_trigger_context;
   - период не придуман заново;
   - результат содержит даты сработок, event_id, правила, решения и суммы, если доступны;
@@ -1080,10 +1056,10 @@ Validation criteria:
   - подходящий source/export tool для истории сработок.
 
 Задача 4:
-- task_id: determine_transaction_source
+- task_id: 4
 - description: По каналу и полям сработки определить источник клиентских событий для выгрузки операций за день сработки.
 - dependencies:
-  - extract_trigger_context
+  - 2
 - input_variables:
   - trigger_context.
 - input_artifacts:
@@ -1096,8 +1072,6 @@ Validation criteria:
   - reason: основание выбора.
 - output_artifacts:
   - transaction_source_decision_artifact, если решение сохраняется.
-- validation_criteria:
-  - источник выбран на основе event_channel/surface/product/полей операции;
   - не выбраны оба источника без необходимости;
   - если канал неопределенный, указана fallback-логика.
 - suggested_tools:
@@ -1105,11 +1079,11 @@ Validation criteria:
   - sandbox/code execution.
 
 Задача 5:
-- task_id: load_transactions_for_trigger_day
+- task_id: 5
 - description: Выгрузить операции клиента за день рассматриваемой сработки из выбранного источника.
 - dependencies:
-  - extract_trigger_context
-  - determine_transaction_source
+  - 2
+  - 4
 - input_variables:
   - trigger_context;
   - transaction_source_decision.
@@ -1124,8 +1098,6 @@ Validation criteria:
   - dataframe trigger_day_transactions_df.
 - output_artifacts:
   - trigger_day_transactions_artifact.
-- validation_criteria:
-  - используется trigger_epk_id из extract_trigger_context;
   - используется trigger_day_start и trigger_day_end из extract_trigger_context;
   - используется источник из determine_transaction_source;
   - результат содержит операции за день сработки или явную диагностику пустого результата;
@@ -1134,13 +1106,13 @@ Validation criteria:
   - spark_export_client_transactions.
 
 Задача 6:
-- task_id: analyze_trigger_behavior_pattern
+- task_id: 6
 - description: Сопоставить сработку, историю сработок за 180 дней и операции за день сработки, чтобы выявить фактический поведенческий паттерн клиента.
 - dependencies:
-  - load_trigger_case
-  - extract_trigger_context
-  - load_client_trigger_history_180d
-  - load_transactions_for_trigger_day
+  - 1
+  - 2
+  - 3
+  - 5
 - input_variables:
   - trigger_context;
   - client_trigger_history_180d_df;
@@ -1159,8 +1131,6 @@ Validation criteria:
   - таблицы/переменные с повторяющимися признаками, если они вычисляются.
 - output_artifacts:
   - trigger_behavior_analysis_artifact.
-- validation_criteria:
-  - анализ опирается только на полученные данные и artifacts;
   - отдельно описаны факты по рассматриваемой сработке;
   - отдельно описана история за 180 дней;
   - отдельно описано поведение внутри дня;
@@ -1217,11 +1187,11 @@ Validation criteria:
 - Добавить аналитическую задачу, которая использует уже существующий artifact с операциями за день.
 
 Пример правильной аналитической задачи:
-- task_id: analyze_uko_trigger_day_and_history
+- task_id: 5
 - description: Используя uko_transactions_2026_04_15_artifact, trigger context и историю сработок за 180 дней, проанализировать поведение клиента в день сработки и повторяемость паттернов.
 - dependencies:
-  - extract_trigger_context
-  - load_client_trigger_history_180d, если история еще не получена.
+  - 2
+  - 3, если история еще не получена.
 - input_variables:
   - trigger_context.
 - input_artifacts:
@@ -1237,8 +1207,6 @@ Validation criteria:
   - structured analysis uko_trigger_day_behavior_analysis.
 - output_artifacts:
   - uko_trigger_day_behavior_analysis_artifact.
-- validation_criteria:
-  - используется существующий artifact uko_transactions_2026_04_15_artifact;
   - повторная выгрузка операций за 2026-04-15 не выполняется;
   - не используется cards_event;
   - анализ ограничен нужным днем и lookback-периодом;
@@ -1283,7 +1251,7 @@ Validation criteria:
 - Явно указать output variable и при необходимости output artifact.
 
 Пример правильной структуры задачи:
-- task_id: retry_calculate_repeated_recipients
+- task_id: 3
 - description: На основе transactions_df фактически рассчитать повторяющихся получателей клиента за 2026-04-15.
 - dependencies: []
 - input_variables:
@@ -1296,8 +1264,6 @@ Validation criteria:
   - dataframe repeated_recipients_df.
 - output_artifacts:
   - repeated_recipients_2026_04_15_artifact, если результат сохраняется.
-- validation_criteria:
-  - результат является таблицей/переменной, а не текстовым планом;
   - используется transactions_df;
   - данные отфильтрованы на 2026-04-15;
   - recipient_name используется для группировки;
@@ -1334,6 +1300,8 @@ Validation criteria:
 Ты — аналитик-исполнитель в многошаговом pipeline.
 
 Твоя задача — выполнить одну конкретную worker-задачу по описанию от planner/replanner и вернуть проверяемый промежуточный результат.
+Нужен содержательный результат, не плейсхолдеры и не обещание будущих действий.
+Не подменяй реальные данные демонстрационными/примерными записями.
 
 Ты используешь только доступные данные, переменные, artifacts, tools, skills и контекст текущей ветки.
 </role>
@@ -1397,8 +1365,9 @@ tool_name(entity_id="entity_id", start_date="start_date")
 9. Для количественных выводов используй полный dataset или агрегирующий artifact tool. Preview/sample/chunk помечай как частичный источник.
 10. Отделяй факты от интерпретаций.
 11. При ошибке tool call сделай одну исправленную попытку, если есть понятный способ исправления.
-12. При невозможности выполнить задачу верни честный результат: что проверено, чего не хватает, почему задача сейчас не может быть выполнена.
+12. Если tool вернул JSON с ok=false или success=false, не называй задачу выполненной. Верни статус "невозможно выполнить" или "ошибка выполнения", процитируй код ошибки, missing_columns/schema/traceback и объясни, какие фактические входные данные были использованы.
 13. Финальный пользовательский отчет оставь responder_node.
+14. Для python_analysis используй только переменные, которые явно есть в available_variables или созданы текущим кодом. Не используй имена из описания задачи как Python-переменные, если их нет в available_variables; в таком случае возьми скалярные значения из resolved_inputs/dependency_context и создай локальный dict внутри кода.
 </execution_rules>
 
 <artifact_rules>
@@ -1607,6 +1576,16 @@ tools:
 10. Не используй никакие другие ключи, кроме is_valid, confidence, reasoning
 11. Не используй альтернативные названия полей: validation_status, feedback, checks, issues, verdict и любые другие
 
+12. Используй мягкую валидацию: возвращай is_valid=false только при жестком фактическом основании.
+    Жесткие основания: worker/task имеет ошибку инструмента, ok=false/success=false,
+    отсутствует обязательный результат, использованы выдуманные данные, или ответ
+    прямо противоречит tool output/artifact.
+13. Не отклоняй результат только из-за неполной формулировки, отличия стиля,
+    отсутствия идеальной детализации или потому что можно было бы сделать больше.
+    Если worker честно вернул частичный результат с указанием ограничений данных,
+    такой результат допустим для передачи дальше.
+    Если при генерации/исполнении кода расчет сделан без видимого источника
+    данных, это жесткое основание для отклонения.
 
 14. Если в сгенерированном коде или результате видно, что для анализа были созданы демонстрационные/примерные входные записи вместо использования доступных данных, верни is_valid=false. Служебные константы, пороги, списки названий колонок и пустые структуры результата допустимы.
 15. Если worker вернул только намерение, план анализа, список будущих шагов,
@@ -1628,6 +1607,7 @@ tools:
 <task>
 Твоя задача — решить, достаточно ли результат сотрудника worker-а покрывает поставленную задачу, все ли данные были проверены и постараться 
 дать совет сотруднику, как ему можно улучшить результат.
+Это проверка: результат одной worker-задачи перед validator.
 
 
 Результат считается достаточным, если worker:
@@ -1646,12 +1626,15 @@ tools:
 
 <review_policy>
 Верни approved=true, если результат можно передать validator-у.
-Верни approved=false, если worker должен доработать эту же задачу перед validator.
+Верни approved=false только если есть жесткая исправимая проблема, которую worker
+может устранить повтором этой же задачи. Во всех спорных случаях верни approved=true
+и перечисли замечания в reasoning/issues без принудительного retry.
 
 Типовые причины для approved=false:
 
 1. Слишком узкое покрытие данных.
 Например, сотрудник искал данные за опреденный период, но ничего не нашел. Совет, который можно дать сотруднику - проанализировать другой период (более широкий) 
+Например, worker проверил только ±3 дня, хотя доступен более широкий период.
 
 2. Не использованы доступные artifacts или dependency context.
 Если в контексте есть artifact с нужными данными, worker должен его использовать или объяснить, почему он не подходит.
@@ -1664,6 +1647,10 @@ Worker делает выводы, которых нет в tool output, artifact
 <retry_policy>
 Если approved=false:
 - укажи, что именно расширить или перепроверить: период, источник, фильтр, artifact, критерий поиска, сравнение или раскрытие partial output.
+- Не требуй retry только ради более красивого отчета, другого стиля ответа,
+  дополнительной детализации или гипотетически более полного исследования.
+Система сама ограничивает число повторов critic-а до 2; текущая конфигурация
+может быть мягче и остановиться раньше.
 </retry_policy>
 
 <decision_principle>
@@ -2040,3 +2027,4 @@ G. В каталоге artifacts есть kind:
 </finalization_rule>
 """
     )
+

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from langchain_core.messages import HumanMessage
@@ -139,56 +138,17 @@ async def _run_agent_from_state_streaming(
 
 
 async def _print_agent_stream_update(update_number: int, state: AgentState) -> None:
-    """Печатает компактное состояние верхнего уровня research-agent.
+    """Пропускает служебные обновления stream-режима без вывода в консоль.
 
     Args:
         update_number: Порядковый номер обновления из ``astream``.
         state: Текущее полное состояние AgentState.
 
     Returns:
-        ``None``. Функция выполняет только консольный вывод.
+        ``None``. Функция оставлена как extension point для stream-режима.
     """
 
-    plan_statuses = {
-        task_id: getattr(task.status, "value", str(task.status))
-        for task_id, task in (state.plan or {}).items()
-    }
-    lines = [
-        f"Run ID: {state.run_id or '(not created yet)'}",
-        f"Current node ID: {state.current_node_id or '(none)'}",
-        f"Parent node IDs: {state.parent_node_ids or []}",
-        f"Latest lineage event: {_format_latest_lineage_event(state)}",
-        f"Plan statuses: {json.dumps(plan_statuses, ensure_ascii=False)}",
-        f"Artifacts in state: {len(state.artifact_index or {})}",
-        f"Tool traces in state: {len(state.tool_traces or [])}",
-        f"Lineage events in update state: {len(state.lineage_events or [])}",
-        f"Final report ready: {bool(state.final_report)}",
-    ]
-    title = f"AGENT STREAM UPDATE #{update_number}"
-    border = "=" * min(max(len(title), 16), 80)
-    text = "\n".join(lines)
-    print(f"\n{border}\n{title}\n{border}\n{text}\n", flush=True)
-
-
-def _format_latest_lineage_event(state: AgentState) -> str:
-    """Возвращает краткое описание последнего lineage-события.
-
-    Args:
-        state: Текущее состояние агента с накопленными lineage events.
-
-    Returns:
-        Строка с типом, заголовком и статусом последнего события или ``(none)``.
-    """
-
-    if not state.lineage_events:
-        return "(none)"
-    event = state.lineage_events[-1] or {}
-    parts = [
-        str(event.get("node_type") or "unknown"),
-        str(event.get("title") or event.get("node_id") or ""),
-        str(event.get("status") or ""),
-    ]
-    return " | ".join(part for part in parts if part)
+    _ = update_number, state
 
 
 def _coerce_agent_state(raw_result: Any, *, fallback: AgentState) -> AgentState:

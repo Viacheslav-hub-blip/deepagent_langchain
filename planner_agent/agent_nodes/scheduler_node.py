@@ -31,9 +31,9 @@ MSG_BLOCKED_BY_UNFINISHED_DEPENDENCIES = (
     "Execution plan is blocked by unfinished dependencies; redirecting to replanner."
 )
 MAX_ARTIFACTS_IN_WORKER_CONTEXT = 12
-MAX_DEPENDENCY_RESULT_CHARS = 3_000
-MAX_DEPENDENCY_ERROR_CHARS = 2_000
-MAX_DEPENDENCY_VALIDATION_CHARS = 1_000
+MAX_DEPENDENCY_RESULT_CHARS = 200_000
+MAX_DEPENDENCY_ERROR_CHARS = 100_000
+MAX_DEPENDENCY_VALIDATION_CHARS = 50_000
 MAX_ARTIFACT_SUMMARY_CHARS = 500
 EXCLUDED_WORKER_CONTEXT_ARTIFACT_ROLES = {
     "prompt_trace",
@@ -83,7 +83,8 @@ def _collect_ancestor_data(
     result_text = node.full_result or node.result_preview
     if result_text:
         previews.append(
-            f"Task {task_id} result: {result_text[:MAX_DEPENDENCY_RESULT_CHARS]}"
+            f"Task {task_id} result: "
+            f"{_limit_text(result_text, max_chars=MAX_DEPENDENCY_RESULT_CHARS)}"
         )
 
     for parent_id in node.dependencies:
@@ -194,7 +195,14 @@ def _build_dependency_context(
                 "output_variable_name": dependency.output_variable_name,
                 "artifact_refs": dependency.artifact_refs,
                 "evidence_refs": dependency.evidence_refs,
-                "result_preview": result_text[:MAX_DEPENDENCY_RESULT_CHARS],
+                "result": _limit_text(
+                    result_text,
+                    max_chars=MAX_DEPENDENCY_RESULT_CHARS,
+                ),
+                "result_preview": _limit_text(
+                    result_text,
+                    max_chars=MAX_DEPENDENCY_RESULT_CHARS,
+                ),
                 "validation_passed": dependency.validation_passed,
                 "validation_reason": _limit_text(
                     dependency.validation_reason,
@@ -401,7 +409,11 @@ async def scheduler_node(
             all_results.extend(parent_results)
 
         # Формирование контекста для задачи
-        visible_var_names = global_vars_on_init.union(all_output_vars)
+        visible_var_names = (
+            global_vars_on_init
+            .union(set(state.data_schemas))
+            .union(all_output_vars)
+        )
         task_context_schemas = {
             name: schema
             for name, schema in schemas.items()
@@ -414,12 +426,13 @@ async def scheduler_node(
         payload = WorkerPayload(
             task=task,
             context_schemas=task_context_schemas,
-            previous_results="",
+            previous_results="\n\n".join(all_results),
             resolved_inputs=dependency_context.get("resolved_inputs", {}),
             dependency_context=dependency_context,
             filesystem_context=state.filesystem_context,
             skill_previews=_select_task_skill_previews(state.skill_previews, task),
             artifact_context=_build_artifact_context(state, task),
+            initial_user_query=state.initial_user_query,
         )
 
         # Обновление статуса задачи на RUNNING
@@ -698,7 +711,28 @@ def _compact_artifact_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "artifact_name": variable_name,
         "schema": schema,
+        "dataframe_file_name": _artifact_file_name(payload, artifact_id),
+        "tool_name": str(metadata.get("tool_name") or "").strip(),
+        "preview_row": str(metadata.get("preview_row") or "").strip(),
     }
+
+
+def _artifact_file_name(payload: dict[str, Any], artifact_id: str) -> str:
+    """Возвращает имя файла dataframe artifact для prompt worker-а.
+
+    Args:
+        payload: JSON-описание artifact из индекса состояния.
+        artifact_id: Идентификатор artifact, используемый как fallback.
+
+    Returns:
+        Имя файла из URI artifact либо ``artifact_id`` при отсутствии URI.
+    """
+
+    uri = str(payload.get("uri") or "").strip()
+    if not uri:
+        return artifact_id
+    normalized = uri.replace("\\", "/").rstrip("/")
+    return normalized.rsplit("/", maxsplit=1)[-1] or artifact_id
 
 
 def _limit_text(value: str | None, *, max_chars: int) -> str | None:
