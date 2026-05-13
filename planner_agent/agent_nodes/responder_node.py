@@ -18,7 +18,7 @@
 - _select_responder_artifacts: выбор artifacts по ссылкам из задач плана.
 - _should_include_responder_artifact: проверка, нужен ли artifact в каталоге.
 - _format_responder_context_artifact: сбор markdown-копии стартового контекста responder.
-- _build_responder_react_tools: инструмент ``submit_final_report`` и artifact_* tools.
+- _build_responder_react_tools: artifact_* tools для чтения результатов.
 - _normalize_final_markdown: нормализация итогового markdown с заголовком отчёта.
 - _extract_responder_tool_calls_from_messages: извлечение tool calls responder с preview результатов.
 - _format_fallback_message: fallback-отчет при ошибке генерации.
@@ -35,10 +35,8 @@ from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langchain_core.tools import StructuredTool
 from langgraph.prebuilt import create_react_agent
 from langgraph.types import Command
-from pydantic import BaseModel, Field
 
 from ..models import AgentState, Task, TaskStatus
 from ..schemas.artifacts import Artifact
@@ -57,14 +55,6 @@ RESPONDER_MAX_ARTIFACTS_IN_CONTEXT = 20
 RESPONDER_ARTIFACT_SUMMARY_MAX_CHARS = 300
 RESPONDER_GENERATED_CODE_MAX_CHARS = 4_000
 RESPONDER_FALLBACK_COMPLETED_MAX_CHARS = 20_000
-
-
-class SubmitFinalReportInput(BaseModel):
-    """Аргументы инструмента финального отчёта."""
-
-    report: str = Field(
-        description="Полный markdown-отчёт пользователю (можно с корневым заголовком).",
-    )
 
 
 def _sort_plan_task_ids(plan: dict[str, Task]) -> list[str]:
@@ -622,35 +612,27 @@ def _normalize_final_markdown(raw: str) -> str:
     return ReportTemplate.HEADER + body
 
 
-def _build_submit_final_report_tool(submitted: list[str]) -> StructuredTool:
-    """Инструмент завершения: одна финальная markdown-строка для пользователя."""
-
-    def submit_final_report(report: str) -> str:
-        """Отправь итоговый markdown-отчёт пользователю. Вызови ровно один раз в конце."""
-        submitted.append(report)
-        return json.dumps({"ok": True, "message": "Final report recorded."}, ensure_ascii=False)
-
-    return StructuredTool.from_function(
-        submit_final_report,
-        name="submit_final_report",
-        description=(
-            "Submit the complete final markdown report for the user. Call exactly once "
-            "when the analysis is ready, after you have used worker conclusions and any "
-            "needed artifact_* tools. The report should answer the user query directly."
-        ),
-        args_schema=SubmitFinalReportInput,
-    )
-
-
 def _build_responder_react_tools(
         *,
         artifact_service: ArtifactService | None,
         run_id: str,
         submitted: list[str],
 ) -> list[Any]:
-    """Собирает tools ReAct responder: финальный submit и чтение artifacts."""
+    """Собирает tools ReAct responder для чтения artifacts.
 
-    tools: list[Any] = [_build_submit_final_report_tool(submitted)]
+    Args:
+        artifact_service: Сервис чтения artifacts или ``None``.
+        run_id: Идентификатор текущего запуска.
+        submitted: Устаревший буфер submit-ответов, оставлен для совместимости
+            с текущей сигнатурой сборщика tools.
+
+    Returns:
+        Список runtime tools для responder-а без инструмента финальной отправки.
+    """
+
+    del submitted
+
+    tools: list[Any] = []
     if artifact_service is not None and run_id:
         existing = {t.name for t in tools if getattr(t, "name", None)}
         for tool in build_artifact_read_tools(artifact_service=artifact_service, run_id=run_id):
@@ -661,7 +643,15 @@ def _build_responder_react_tools(
 
 
 def _append_responder_react_policy(system_prompt: str) -> str:
-    """Добавляет к системному промпту правила ReAct и обязательный submit_final_report."""
+    """Добавляет к системному промпту правила ReAct и обычного финального AIMessage.
+
+    Args:
+        system_prompt: Базовый системный prompt responder-а.
+
+    Returns:
+        Системный prompt с правилами использования artifact tools и финального
+        ответа обычным сообщением модели.
+    """
 
     appendix = """
 
@@ -671,8 +661,8 @@ def _append_responder_react_policy(system_prompt: str) -> str:
 1. В пользовательском сообщении уже есть сводка по задачам плана: приоритетно полные ответы worker-ов (full_result), статусы и списки artifact id.
 2. Каталог artifacts даёт только id и метаданные. Чтобы увидеть данные внутри файла (выгрузки, длинные отчёты), вызывай инструменты artifact_preview, artifact_read_chunk, artifact_profile, artifact_sample, artifact_search, artifact_value_counts или artifact_list.
 3. Не придумывай факты, которых нет в выводах worker-ов или в прочитанных через tools artifacts.
-4. Когда отчёт готов, один раз вызови инструмент submit_final_report с полным markdown для пользователя (можно со своими заголовками; система добавит стандартный префикс при необходимости).
-5. Не завершай работу только общим комментарием в тексте — итог должен быть передан через submit_final_report.
+4. Когда отчёт готов, верни полный markdown-ответ обычным AIMessage без вызова финального submit-инструмента.
+5. Не вызывай несуществующие tools для финальной отправки ответа.
 6. Не читай artifacts массово. Читай только те artifacts, которые нужны для
    проверки ключевых выводов, точных чисел, полей, ошибок или доказательств,
    явно важных для запроса пользователя. Если full_result worker-а уже
@@ -687,7 +677,15 @@ def _extract_final_markdown_from_react(
         react_messages: list[Any],
         submitted: list[str],
 ) -> str:
-    """Извлекает итоговый markdown из вызова submit_final_report или последнего AI-ответа."""
+    """Извлекает итоговый markdown из последнего AIMessage или legacy submit-буфера.
+
+    Args:
+        react_messages: Сообщения, возвращенные responder ReAct-agent.
+        submitted: Устаревший буфер submit-ответов для обратной совместимости.
+
+    Returns:
+        Нормализованный markdown финального ответа.
+    """
 
     if submitted:
         return _normalize_final_markdown(submitted[-1])
@@ -699,7 +697,7 @@ def _extract_final_markdown_from_react(
         tool_calls = getattr(last_ai, "tool_calls", None) or []
         if not tool_calls:
             return _normalize_final_markdown(str(last_ai.content))
-    raise ValueError("Responder ReAct did not call submit_final_report and left no final text.")
+    raise ValueError("Responder ReAct left no final AIMessage text.")
 
 
 def _extract_responder_tool_calls_from_messages(
@@ -786,7 +784,7 @@ async def responder_node(
         lineage_service: LineageService | None = None,
         artifact_service: ArtifactService | None = None,
 ) -> Command:
-    """Генерирует финальный отчёт через ReAct-агента (tools: artifacts + submit_final_report).
+    """Генерирует финальный отчёт через ReAct-агента с artifact tools.
 
     Args:
         state: Текущее состояние AgentState.

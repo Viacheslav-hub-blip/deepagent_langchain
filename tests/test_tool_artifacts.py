@@ -353,6 +353,60 @@ class ToolArtifactTests(unittest.TestCase):
             self.assertIn(dataset_artifact.artifact_id, artifact_index)
             self.assertEqual(dataset_artifact.artifact_id, "tsmall-list_load_day_events_1")
 
+    def test_records_envelope_result_is_saved_as_csv_artifact(self) -> None:
+        """Проверяет, что dict с records сохраняется как CSV dataset artifact."""
+
+        @tool("spark_query")
+        async def spark_query(client_id: str) -> dict:
+            """Возвращает тестовую Spark-like выборку в envelope-формате."""
+            return {
+                "ok": True,
+                "table_name": "events",
+                "records": [
+                    {"client_id": client_id, "event_id": "evt-1", "amount": 100},
+                    {"client_id": client_id, "event_id": "evt-2", "amount": 200},
+                ],
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifacts = ArtifactService(tmp)
+            task = Task(task_id="records-envelope", description="Load records")
+            artifact_index: dict = {}
+            tool_traces: list[dict] = []
+
+            wrapped_tool = wrap_tools_for_artifacts(
+                tools=[spark_query],
+                artifact_service=artifacts,
+                run_id="run-records-envelope",
+                node_id="node-records-envelope",
+                task=task,
+                artifact_index=artifact_index,
+                tool_traces=tool_traces,
+            )[0]
+
+            result = run(wrapped_tool.ainvoke({"client_id": "client-2"}))
+
+            response = json.loads(result)
+            self.assertTrue(response["ok"])
+            self.assertIn("artifact_refs", response)
+
+            stored = artifacts.list_artifacts("run-records-envelope")
+            dataset_artifact = next(
+                artifact
+                for artifact in stored
+                if artifact.metadata.get("artifact_role") == "captured_tool_result"
+            )
+            self.assertEqual(dataset_artifact.kind, "dataset")
+            self.assertEqual(dataset_artifact.mime_type, "text/csv")
+            self.assertEqual(dataset_artifact.metadata["records_payload_key"], "records")
+            self.assertEqual(
+                dataset_artifact.metadata["records_envelope_metadata"]["table_name"],
+                "events",
+            )
+            csv_content = Path(dataset_artifact.uri).read_text(encoding="utf-8")
+            self.assertIn("amount,client_id,event_id", csv_content.splitlines()[0])
+            self.assertIn("100,client-2,evt-1", csv_content)
+
     def test_tool_exception_returns_actionable_error_for_model(self) -> None:
         """Проверяет, что исключение инструмента возвращается как понятный JSON."""
 

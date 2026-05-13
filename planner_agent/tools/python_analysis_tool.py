@@ -322,6 +322,37 @@ def _validate_target_variable(target_variable: str) -> str:
     return name
 
 
+def _normalize_code_text(code: str) -> str:
+    """Нормализует текст Python-кода перед валидацией.
+
+    Args:
+        code: Исходный текст кода, переданный моделью в ``python_analysis``.
+
+    Returns:
+        Код без изменений, если он уже синтаксически корректен, либо код с
+        преобразованными JSON-escaped переносами строк ``\\n``/``\\r\\n``.
+    """
+
+    raw_code = str(code or "")
+    try:
+        ast.parse(raw_code, mode="exec")
+        return raw_code
+    except SyntaxError as exc:
+        message = str(exc)
+
+    if "\\n" not in raw_code:
+        return raw_code
+    if "unexpected character after line continuation character" not in message:
+        return raw_code
+
+    return (
+        raw_code
+        .replace("\\r\\n", "\n")
+        .replace("\\n", "\n")
+        .replace("\\t", "\t")
+    )
+
+
 def _validate_code_policy(code: str) -> None:
     """Проверяет код на базовые запрещенные операции перед выполнением.
 
@@ -410,7 +441,7 @@ def _execute_python_code(
         ``PythonExecutionResult`` с успехом, предпросмотром или ошибкой.
     """
 
-    generated_code = str(code or "")
+    generated_code = _normalize_code_text(str(code or ""))
     try:
         target_name = _validate_target_variable(target_variable)
         _validate_code_policy(generated_code)

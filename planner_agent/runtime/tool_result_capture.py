@@ -18,6 +18,8 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import re
 from pathlib import Path
@@ -426,9 +428,17 @@ def _capture_generated_artifact(
         extension = "csv"
         kind = "dataset"
         preview = _dataframe_summary(result_metadata)
+    elif records_table := _extract_records_table(raw_result):
+        content = _records_to_csv(records_table)
+        mime_type = "text/csv"
+        extension = "csv"
+        kind = "dataset"
+        preview = _records_summary(result_metadata)
     else:
         content = serialize_tool_result(raw_result, max_chars=None)
 
+    records_table_key = "records" if _extract_records_table(raw_result) else ""
+    records_envelope_metadata = _extract_records_envelope_metadata(raw_result)
     return artifact_service.write_artifact(
         run_id=run_id,
         node_id=node_id,
@@ -457,6 +467,8 @@ def _capture_generated_artifact(
             "preview_row": result_metadata["preview_row"],
             "variable_name": variable_name if _is_dataframe(raw_result) else "",
             "sandbox_variable_name": variable_name if _is_dataframe(raw_result) else "",
+            "records_payload_key": records_table_key,
+            "records_envelope_metadata": records_envelope_metadata,
             "reusable": True,
             "editable": True,
         },
@@ -687,6 +699,83 @@ def _dataframe_to_csv(value: Any) -> str:
     """
 
     return value.to_csv(index=False)
+
+
+def _extract_records_table(value: Any) -> list[dict[str, Any]]:
+    """Извлекает табличные записи из результата инструмента.
+
+    Args:
+        value: Результат LangChain tool, например ``{"records": [...]}``.
+
+    Returns:
+        Список словарей records, если результат похож на табличную выборку,
+        иначе пустой список.
+    """
+
+    if not isinstance(value, dict):
+        return []
+    records = value.get("records")
+    if not isinstance(records, list):
+        return []
+    if not all(isinstance(item, dict) for item in records):
+        return []
+    return records
+
+
+def _records_to_csv(records: list[dict[str, Any]]) -> str:
+    """Сериализует список records в CSV.
+
+    Args:
+        records: Список словарей, где каждый словарь является строкой таблицы.
+
+    Returns:
+        CSV-текст с объединенным набором колонок из всех records.
+    """
+
+    output = io.StringIO()
+    fieldnames = sorted({str(key) for record in records for key in record.keys()})
+    writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for record in records:
+        writer.writerow({str(key): value for key, value in record.items()})
+    return output.getvalue()
+
+
+def _records_summary(result_meta: dict[str, Any]) -> str:
+    """Создает краткое описание CSV artifact из records.
+
+    Args:
+        result_meta: Метаданные табличного результата.
+
+    Returns:
+        Строка summary для artifact.
+    """
+
+    return (
+        "Records artifact: "
+        f"rows={result_meta['row_count']}, "
+        f"columns={result_meta['columns']}, "
+        f"has_empty_values={result_meta['has_empty_values']}"
+    )
+
+
+def _extract_records_envelope_metadata(value: Any) -> dict[str, Any]:
+    """Извлекает служебные поля dict-обертки вокруг records.
+
+    Args:
+        value: Результат tool, который может содержать ключ ``records``.
+
+    Returns:
+        Словарь без поля ``records`` для сохранения контекста запроса в metadata.
+    """
+
+    if not isinstance(value, dict) or "records" not in value:
+        return {}
+    return {
+        str(key): to_jsonable(item)
+        for key, item in value.items()
+        if key != "records"
+    }
 
 
 def _safe_filename_fragment(value: str) -> str:

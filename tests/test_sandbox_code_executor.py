@@ -165,6 +165,27 @@ class SandboxCodeExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("solution_options", result)
         self.assertIn("retry_guidance", result)
 
+    async def test_python_analysis_normalizes_json_escaped_newlines(self) -> None:
+        """Проверяет, что tool исправляет JSON-escaped переносы строк в коде."""
+
+        sandbox = FakeSandbox()
+        analysis_tool = build_python_analysis_tool(sandbox)
+
+        raw_result = await analysis_tool.ainvoke(
+            {
+                "code": "import pandas as pd\\n\\nchannel_value = 'MOBILE'",
+                "target_variable": "channel_value",
+            }
+        )
+
+        result = json.loads(raw_result)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["target_variable"], "channel_value")
+        self.assertEqual(sandbox.globals["channel_value"], "MOBILE")
+        self.assertIn("\n\nchannel_value", result["generated_code"])
+        self.assertNotIn("\\n\\nchannel_value", result["generated_code"])
+
     async def test_python_analysis_returns_runtime_error_as_json(self) -> None:
         """Проверяет, что runtime-ошибка видна модели вместе с traceback."""
 
