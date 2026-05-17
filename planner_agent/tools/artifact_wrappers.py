@@ -4,12 +4,14 @@
 - ArtifactToolWrapper: wrapper над обычным LangChain tool.
 - wrap_tools_for_artifacts: массовое оборачивание tools для worker.
 - _clean_runtime_kwargs: удаление runtime-only kwargs.
-- _format_tool_success_response: единый понятный ответ LLM для успешного вызова.
+- _format_tool_success_response: единый текстовый ответ LLM для успешного вызова.
+- _format_inline_tool_result_text: преобразование inline-результата tool в текст без JSON-обертки.
+- _format_structured_tool_error_text: преобразование структурированной ошибки tool в текст.
+- _format_tool_exception_response: текстовая диагностика исключения инструмента.
 - _build_tool_error_payload: диагностический JSON для ошибки инструмента.
 - _tool_error_possible_causes: вероятные причины ошибки инструмента.
 - _tool_error_solution_options: варианты исправления ошибки инструмента.
 - _format_tool_error_trace_content: текст trace artifact для ошибки.
-- _json_text: сериализация JSON-ответа инструмента.
 - _limited_serialized: компактная сериализация аргументов/результатов.
 - _limit_tool_text: обрезка диагностического текста инструмента.
 - _tool_input_from_call: восстановление входа tool из args/kwargs.
@@ -17,12 +19,13 @@
 - _build_artifact_label: формирование человеко-читаемого id artifact-а вызова.
 - _build_variable_name: формирование имени sandbox-переменной для DataFrame.
 - _is_dataframe: проверка DataFrame-подобного результата.
-- _is_meta_tool: проверка имени мета-инструмента (artifact_*/skill_*).
+- _is_meta_tool: проверка имени мета-инструмента чтения существующих данных.
 - _is_significant_for_task_refs: фильтр artifacts для добавления в task.artifact_refs.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import traceback
 from typing import Any
@@ -37,9 +40,11 @@ from ..runtime.tool_result_capture import (
     capture_tool_result,
     serialize_tool_result,
 )
+from ..runtime.tool_text import ToolTextResult, is_tool_error_result
 from ..runtime.sandbox import PythonSandboxProtocol
 from ..schemas.artifacts import Artifact
 from ..services.artifact_service import ArtifactService
+from .python_analysis_tool import PYTHON_ANALYSIS_TOOL_NAME
 
 TOOL_ARTIFACT_SUMMARY_MAX_LEN = 500
 TOOL_ERROR_TRACEBACK_MAX_LEN = 8_000
@@ -48,7 +53,8 @@ INLINE_TOOL_RESULT_MAX_CHARS = 8_000
 # Префиксы инструментов, которые читают существующие artifacts/skills и не должны
 # создавать собственные artifact-записи. Их вызовы покрываются tool-calls trace
 # на уровне worker_node, а сами они не приносят новых данных.
-META_TOOL_PREFIXES: tuple[str, ...] = ("artifact_", "skill_")
+META_TOOL_PREFIXES: tuple[str, ...] = ()
+META_TOOL_NAMES: frozenset[str] = frozenset({"list_skills", "load_skill"})
 
 # Капчи tool результата, которые попадают в task.artifact_refs. Это только
 # существенные (большие или ссылочные) данные, на которые могут опираться
@@ -106,7 +112,7 @@ class ArtifactToolWrapper(BaseTool):
                 f"{wrapped_tool.description} "
                 "Runtime note: large outputs are automatically captured into run "
                 "artifacts and replaced with compact references in LLM context. "
-                "Use artifact read tools to inspect full payloads."
+                "Large outputs are saved as artifacts for lineage and UI inspection."
             ).strip(),
             args_schema=wrapped_tool.args_schema,
             return_direct=wrapped_tool.return_direct,
@@ -277,7 +283,7 @@ class ArtifactToolWrapper(BaseTool):
             exc: Исключение, возникшее внутри исходного инструмента.
 
         Returns:
-            JSON-строка с описанием ошибки, контекстом и вариантами исправления.
+            Текст с описанием ошибки, контекстом и вариантами исправления.
         """
 
         trace_id = uuid4().hex
@@ -346,7 +352,7 @@ class ArtifactToolWrapper(BaseTool):
         )
         error_payload["tool_trace_artifact_id"] = artifact.artifact_id
         error_payload["tool_trace_uri"] = artifact.uri
-        return _json_text(error_payload)
+        return _format_tool_exception_response(error_payload=error_payload)
 
     def _write_trace_artifact(
             self,
@@ -491,7 +497,11 @@ class ArtifactToolWrapper(BaseTool):
             if isinstance(metadata, dict):
                 metadata["variable_name"] = variable_name
                 metadata["sandbox_variable_name"] = variable_name
-            if isinstance(captured.content_for_llm, str) and "sandbox_variable_name:" not in captured.content_for_llm:
+            if (
+                    isinstance(captured.content_for_llm, str)
+                    and "<tool_result>" not in captured.content_for_llm
+                    and "sandbox_variable_name" not in captured.content_for_llm
+            ):
                 captured.content_for_llm = (
                     f"{captured.content_for_llm}\n"
                     f"variable_name: {variable_name}\n"
@@ -510,7 +520,7 @@ class ArtifactToolWrapper(BaseTool):
             - tool_trace artifact самой обертки никогда не попадает в task.artifact_refs;
               он остается доступен только через state.artifact_index и tool_calls trace.
             - результат, попавший в state inline (без захвата), не считается значимым.
-            - артефакты, созданные мета-инструментами (artifact_*/skill_*), исключаются —
+            - артефакты, созданные мета-инструментами (list_skills/load_skill), исключаются —
               это просто чтение уже существующих данных.
             - inline-структурированные результаты (capture_reason=inline_structured_result)
               исключаются — они уже попали в контекст worker-а как обычные значения.
@@ -594,7 +604,7 @@ def _format_tool_success_response(
         tool_name: str,
         tool_input: Any,
         captured: Any,
-) -> Any:
+) -> str:
     """Формирует понятный ответ инструмента для LLM.
 
     Args:
@@ -603,48 +613,268 @@ def _format_tool_success_response(
         captured: Результат перехвата output, созданный ``capture_tool_result``.
 
     Returns:
-        Специальный artifact/DataFrame ответ или JSON-строка с inline-результатом.
+        Текстовый ответ инструмента без JSON-обертки.
     """
 
-    if captured.was_captured:
-        return captured.content_for_llm
-    if captured.artifact_refs:
-        return _json_text(
-            {
-                "ok": True,
-                "tool_name": tool_name,
-                "what_happened": (
-                    "Инструмент успешно вернул структурированный результат. "
-                    "Результат также сохранен как artifact для последующего чтения."
-                ),
-                "tool_input": _limited_serialized(tool_input),
-                "result": captured.content_for_llm,
-                "result_preview": captured.preview,
-                "artifact_refs": captured.artifact_refs,
-                "result_kind": captured.result_kind,
-                "next_steps": [
-                    "Используй inline result, если его достаточно для текущей задачи.",
-                    "Если нужен полный файл или проверка данных, прочитай artifact через artifact tools.",
-                    "В ответе укажи artifact_id, если вывод опирается на сохраненный результат.",
-                ],
-            }
+    if tool_name == PYTHON_ANALYSIS_TOOL_NAME:
+        formatted = _format_python_analysis_tool_response(
+            tool_input=tool_input,
+            raw_result=captured.content_for_llm,
         )
-    return _json_text(
-        {
-            "ok": True,
-            "tool_name": tool_name,
-            "what_happened": "Инструмент успешно выполнился и вернул небольшой inline-результат.",
-            "tool_input": _limited_serialized(tool_input),
-            "result": captured.content_for_llm,
-            "result_preview": captured.preview,
-            "result_kind": captured.result_kind,
-            "next_steps": [
-                "Используй result как фактический вывод инструмента.",
-                "Если result недостаточен для задачи, вызови подходящий инструмент с более точными аргументами.",
-                "Если нужны вычисления по result, сохрани его в переменную или используй python_analysis.",
-            ],
-        }
+        if formatted is not None:
+            return formatted
+
+    if captured.was_captured:
+        return str(captured.content_for_llm)
+    if is_tool_error_result(captured.content_for_llm):
+        return captured.content_for_llm
+    if isinstance(captured.content_for_llm, dict) and captured.content_for_llm.get("ok") is False:
+        return _format_structured_tool_error_text(
+            tool_name=tool_name,
+            tool_input=tool_input,
+            payload=captured.content_for_llm,
+        )
+
+    result_text = _format_inline_tool_result_text(captured.content_for_llm)
+    if captured.artifact_refs:
+        return (
+            f"Инструмент {tool_name} выполнил запрос.\n"
+            "Структурированный результат также сохранен как artifact для последующего чтения.\n"
+            f"Artifact: {', '.join(captured.artifact_refs)}.\n"
+            f"Тип результата: {captured.result_kind}.\n\n"
+            f"Данные:\n{result_text}\n\n"
+            "Дальше: используй текст выше, если его достаточно. Если нужен полный файл или проверка данных, "
+            "используй artifact_id в выводе."
+        )
+    return (
+        f"Инструмент {tool_name} выполнил запрос.\n"
+        f"Тип результата: {captured.result_kind}.\n\n"
+        f"Данные:\n{result_text}\n\n"
+        "Дальше: используй этот результат как фактический вывод инструмента. "
+        "Если данных недостаточно, повтори вызов с более точными аргументами или используй подходящий инструмент анализа."
     )
+
+
+def _format_python_analysis_tool_response(
+        *,
+        tool_input: Any,
+        raw_result: Any,
+) -> str | ToolTextResult | None:
+    """Формирует ответ execute_python_code с акцентом на stdout и preview.
+
+    Args:
+        tool_input: Аргументы вызова инструмента.
+        raw_result: JSON-строка или словарь результата ``PythonExecutionResult``.
+
+    Returns:
+        Текст для LLM, ``ToolTextResult`` при ошибке выполнения или ``None``.
+    """
+
+    payload = _parse_python_analysis_payload(raw_result)
+    if payload is None:
+        return None
+
+    if payload.get("success") is True:
+        lines = [
+            "Python-код выполнен успешно.",
+            str(payload.get("message") or "").strip(),
+        ]
+        target_variable = str(payload.get("target_variable") or "").strip()
+        if target_variable:
+            lines.append(f"target_variable: {target_variable}")
+        variable_preview = str(payload.get("variable_preview") or "").strip()
+        if variable_preview:
+            lines.append("preview результата:")
+            lines.append(variable_preview)
+        execution_output = str(payload.get("execution_output") or "").strip()
+        if execution_output:
+            lines.append("вывод в консоль (execution_output):")
+            lines.append(execution_output)
+        available_variables = payload.get("available_variables")
+        if isinstance(available_variables, list) and available_variables:
+            preview_names = ", ".join(str(name) for name in available_variables[:40])
+            suffix = ""
+            if len(available_variables) > 40:
+                suffix = f" ... еще {len(available_variables) - 40}"
+            lines.append(f"available_variables: {preview_names}{suffix}")
+        lines.append(
+            "Дальше: используй execution_output и preview как фактический результат. "
+            "Если нужна именованная переменная для следующего шага, повтори вызов с target_variable."
+        )
+        return _limit_tool_text("\n".join(line for line in lines if line), max_chars=INLINE_TOOL_RESULT_MAX_CHARS)
+
+    lines = [
+        "Ошибка execute_python_code: код не выполнен или не дал ожидаемый результат.",
+        str(payload.get("message") or payload.get("error") or "Неизвестная ошибка."),
+    ]
+    if payload.get("error"):
+        lines.append(f"error: {payload['error']}")
+    execution_output = str(payload.get("execution_output") or "").strip()
+    if execution_output:
+        lines.append("вывод в консоль (execution_output):")
+        lines.append(execution_output)
+    if payload.get("traceback"):
+        lines.append("traceback:")
+        lines.append(str(payload["traceback"]))
+    if payload.get("possible_causes"):
+        lines.append("possible_causes:")
+        lines.extend(f"- {item}" for item in payload["possible_causes"])
+    if payload.get("solution_options"):
+        lines.append("solution_options:")
+        lines.extend(f"- {item}" for item in payload["solution_options"])
+    if payload.get("retry_guidance"):
+        lines.append(f"retry_guidance: {payload['retry_guidance']}")
+    if payload.get("available_variables"):
+        lines.append(
+            "available_variables: "
+            + ", ".join(str(name) for name in payload["available_variables"][:40])
+        )
+    lines.append(f"Аргументы вызова: {_limited_serialized(tool_input)}.")
+    return ToolTextResult(_limit_tool_text("\n".join(lines), max_chars=INLINE_TOOL_RESULT_MAX_CHARS), is_error=True)
+
+
+def _parse_python_analysis_payload(raw_result: Any) -> dict[str, Any] | None:
+    """Извлекает JSON-ответ execute_python_code из результата tool.
+
+    Args:
+        raw_result: Сырой результат tool.
+
+    Returns:
+        Словарь с полями ``success``, ``execution_output`` и т.д. или ``None``.
+    """
+
+    if isinstance(raw_result, dict) and "success" in raw_result:
+        return raw_result
+    if not isinstance(raw_result, str):
+        return None
+    text = raw_result.strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return None
+    if isinstance(parsed, dict) and "success" in parsed:
+        return parsed
+    return None
+
+
+def _format_inline_tool_result_text(value: Any) -> str:
+    """Преобразует inline-результат инструмента в человекочитаемый текст.
+
+    Args:
+        value: Результат tool, который можно передать worker inline.
+
+    Returns:
+        Текст без JSON-обертки ``ok/tool_name/result``.
+    """
+
+    if isinstance(value, str):
+        return _limit_tool_text(value, max_chars=INLINE_TOOL_RESULT_MAX_CHARS)
+    if isinstance(value, list):
+        if not value:
+            return "Пустой список."
+        rows = [f"Получено элементов: {len(value)}."]
+        for index, item in enumerate(value[:10], start=1):
+            rows.append(f"{index}. {_format_inline_item_text(item)}")
+        if len(value) > 10:
+            rows.append(f"...еще {len(value) - 10} элементов не показаны в кратком выводе.")
+        return "\n".join(rows)
+    if isinstance(value, dict):
+        lines = []
+        for key, item in value.items():
+            lines.append(f"- {key}: {_format_inline_item_text(item)}")
+        return "\n".join(lines) if lines else "Пустой объект."
+    return _limit_tool_text(str(value), max_chars=INLINE_TOOL_RESULT_MAX_CHARS)
+
+
+def _format_inline_item_text(value: Any) -> str:
+    """Формирует короткий текст для элемента inline-результата.
+
+    Args:
+        value: Элемент списка или значение словаря.
+
+    Returns:
+        Однострочное человекочитаемое представление значения.
+    """
+
+    if isinstance(value, dict):
+        parts = [f"{key}={_format_inline_item_text(item)}" for key, item in value.items()]
+        return "; ".join(parts)
+    if isinstance(value, list):
+        if not value:
+            return "пустой список"
+        preview = "; ".join(_format_inline_item_text(item) for item in value[:3])
+        suffix = f"; еще {len(value) - 3} элементов" if len(value) > 3 else ""
+        return f"список из {len(value)} элементов: {preview}{suffix}"
+    return _limit_tool_text(str(value), max_chars=500)
+
+
+def _format_structured_tool_error_text(
+        *,
+        tool_name: str,
+        tool_input: Any,
+        payload: dict[str, Any],
+) -> str:
+    """Преобразует старый структурированный payload ошибки в текст.
+
+    Args:
+        tool_name: Имя инструмента.
+        tool_input: Аргументы вызова инструмента.
+        payload: Словарь ошибки, который вернул исходный tool.
+
+    Returns:
+        Человекочитаемый текст ошибки без JSON-обертки.
+    """
+
+    error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+    code = error.get("code") or payload.get("code") or "unknown_error"
+    message = error.get("message") or payload.get("message") or "Инструмент вернул ошибку."
+    missing_columns = error.get("missing_columns") or payload.get("missing_columns")
+    available_tables = error.get("available_tables") or payload.get("available_tables")
+    lines = [
+        f"Ошибка инструмента {tool_name}: запрос не выполнен.",
+        f"Код ошибки: {code}.",
+        f"Причина: {message}",
+    ]
+    if missing_columns:
+        lines.append(f"Отсутствующие поля: {', '.join(map(str, missing_columns))}.")
+    if available_tables:
+        lines.append(f"Доступные таблицы и алиасы: {', '.join(map(str, available_tables))}.")
+    if payload.get("schema"):
+        lines.append(f"Схема таблицы: {_limited_serialized(payload['schema'])}.")
+    lines.append(f"Аргументы вызова: {_limited_serialized(tool_input)}.")
+    lines.append("Как исправить: не повторяй тот же вызов без изменений; исправь table_name, select_columns или filters по тексту ошибки.")
+    return ToolTextResult("\n".join(lines), is_error=True)
+
+
+def _format_tool_exception_response(*, error_payload: dict[str, Any]) -> str:
+    """Формирует текстовый ответ об исключении инструмента для worker-а.
+
+    Args:
+        error_payload: Диагностический payload, собранный ``_build_tool_error_payload``.
+
+    Returns:
+        Текст с типом ошибки, причиной, вариантами исправления и ссылкой на trace artifact.
+    """
+
+    error = error_payload["error"]
+    lines = [
+        f"Ошибка инструмента {error_payload['tool_name']}: инструмент не смог выполнить запрос.",
+        f"Тип ошибки: {error['type']}.",
+        f"Сообщение: {error['message']}",
+        f"Аргументы вызова: {error_payload['tool_input']}.",
+    ]
+    if error_payload.get("possible_causes"):
+        lines.append("Возможные причины:")
+        lines.extend(f"- {cause}" for cause in error_payload["possible_causes"])
+    if error_payload.get("solution_options"):
+        lines.append("Как исправить:")
+        lines.extend(f"- {option}" for option in error_payload["solution_options"])
+    lines.append(f"Повтор: {error_payload['retry_guidance']}")
+    if error_payload.get("tool_trace_artifact_id"):
+        lines.append(f"Trace artifact: {error_payload['tool_trace_artifact_id']}.")
+    return ToolTextResult("\n".join(lines), is_error=True)
 
 
 def _build_tool_error_payload(
@@ -740,8 +970,12 @@ def _tool_error_solution_options(
         options.append("Используй поддерживаемый формат или другой инструмент, подходящий для этого типа данных.")
     if "outside allowed roots" in text or "permission" in text:
         options.append("Используй путь внутри разрешенного workspace или sources/contexts директории.")
-    if "python" in tool_name.lower():
-        options.append("Исправь код и повтори python_analysis с тем же target_variable, если результат все еще нужен.")
+    if "python" in tool_name.lower() or tool_name == PYTHON_ANALYSIS_TOOL_NAME:
+        options.append(
+            "Исправь код и повтори execute_python_code. "
+            "target_variable указывай только если нужна именованная переменная; "
+            "для print-вывода читай execution_output."
+        )
     else:
         options.append("Если инструмент не подходит под задачу, выбери другой доступный tool из prompt.")
     return options
@@ -767,21 +1001,9 @@ def _format_tool_error_trace_content(
     return (
         f"Tool: {tool_name}\n\n"
         f"Arguments:\n{serialize_tool_result(tool_input, max_chars=TOOL_ARTIFACT_SUMMARY_MAX_LEN)}\n\n"
-        f"Error response:\n{_json_text(error_payload)}"
+        f"Error response:\n{_format_tool_exception_response(error_payload=error_payload)}\n\n"
+        f"Traceback:\n{error_payload.get('traceback', '')}"
     )
-
-
-def _json_text(payload: dict[str, Any]) -> str:
-    """Сериализует payload в читаемый JSON для ToolMessage.
-
-    Args:
-        payload: JSON-совместимый словарь.
-
-    Returns:
-        Строка JSON без ASCII-экранирования.
-    """
-
-    return serialize_tool_result(payload, max_chars=None)
 
 
 def _limited_serialized(value: Any) -> str:
@@ -913,7 +1135,7 @@ def _is_meta_tool(tool_name: str) -> bool:
     """Проверяет, относится ли инструмент к мета-tools чтения существующих данных."""
 
     name = (tool_name or "").lower()
-    return any(name.startswith(prefix) for prefix in META_TOOL_PREFIXES)
+    return name in META_TOOL_NAMES or any(name.startswith(prefix) for prefix in META_TOOL_PREFIXES)
 
 
 def _is_significant_for_task_refs(payload: dict[str, Any] | Artifact) -> bool:

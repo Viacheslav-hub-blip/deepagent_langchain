@@ -13,6 +13,7 @@ from typing import Any, Protocol
 class PythonSandboxProtocol(Protocol):
     last_dataframe_variable: str | None
     globals: dict[str, Any]
+    working_directory: Any | None
 
     async def get_all_variable_previews(self) -> dict[str, str]:
         ...

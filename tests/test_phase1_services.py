@@ -75,8 +75,8 @@ class Phase1ServiceTests(unittest.TestCase):
             self.assertEqual(len(feedback.list_feedback("run-1")), 1)
 
             policy = PolicyEngine(runs_dir=tmp)
-            allowed = policy.evaluate_tool_call("load_additional_context", {"context_file": "design.md"})
-            denied = policy.evaluate_tool_call("workspace_write_file", {"file_path": "run.ps1"})
+            allowed = policy.evaluate_tool_call("read_table", {"table_name": "hits", "select_columns": "event_id"})
+            denied = policy.evaluate_tool_call("forbidden_tool", {"file_path": "run.ps1"})
             review = policy.evaluate_tool_call("unknown_tool", {})
             self.assertEqual(allowed.decision, "allow")
             self.assertEqual(denied.decision, "deny")

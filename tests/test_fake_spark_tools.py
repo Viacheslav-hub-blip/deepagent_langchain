@@ -1,7 +1,7 @@
-"""Тесты универсального Spark-like LangChain tool для чтения CSV из examples/data.
+﻿"""Тесты универсального Spark-like LangChain tool для чтения CSV из examples/data.
 
 Содержит:
-- FakeSparkToolsTests: набор проверок spark_query_table.
+- FakeSparkToolsTests: набор проверок read_table.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import unittest
 import pandas as pd
 
 from examples.fake_spark_tools import SparkTableFilter, SparkTableQueryInput, build_fake_spark_tools
+from planner_agent.runtime.tool_text import is_tool_error_result
 
 
 class FakeSparkToolsTests(unittest.TestCase):
@@ -36,9 +37,9 @@ class FakeSparkToolsTests(unittest.TestCase):
 
         tools = {tool.name: tool for tool in build_fake_spark_tools(delay_seconds=0.0)}
 
-        self.assertEqual(set(tools), {"spark_query_table"})
+        self.assertEqual(set(tools), {"read_table"})
 
-    def test_spark_query_table_selects_columns(self) -> None:
+    def test_read_table_selects_columns(self) -> None:
         """Проверяет выбор конкретных полей из таблицы.
 
         Args:
@@ -64,7 +65,95 @@ class FakeSparkToolsTests(unittest.TestCase):
         self.assertLessEqual(len(result), 3)
         self.assertGreater(result.attrs["spark_matched_rows"], 0)
 
-    def test_spark_query_table_applies_filters(self) -> None:
+    def test_read_table_supports_raw_table_aliases(self) -> None:
+        """Проверяет алиасы raw-таблиц cards_event и uko_event.
+
+        Args:
+            Отсутствуют.
+
+        Returns:
+            None.
+        """
+
+        tool = build_fake_spark_tools(delay_seconds=0.0)[0]
+
+        cards_results = [
+            asyncio.run(
+                tool.ainvoke(
+                    {
+                        "table_name": table_name,
+                        "select_columns": "event_id, user_id",
+                        "max_rows": 1,
+                    }
+                )
+            )
+            for table_name in ("cards_event", "csp_afpc_sss_inc.cards_event", "cspfs_repo_features3.cards_event")
+        ]
+        uko_results = [
+            asyncio.run(
+                tool.ainvoke(
+                    {
+                        "table_name": table_name,
+                        "select_columns": "event_id, user_id",
+                        "max_rows": 1,
+                    }
+                )
+            )
+            for table_name in ("uko_event", "csp_afpc_sss_inc.uko_event", "cspfs_repo_features3.uko_event")
+        ]
+
+        for result in cards_results + uko_results:
+            self.assertIsInstance(result, pd.DataFrame)
+            self.assertEqual(len(result), 1)
+
+        self.assertEqual({result.attrs["spark_source_file"] for result in cards_results}, {"csp_afpc_sss_inc.cards_event.csv"})
+        self.assertEqual({result.attrs["spark_source_file"] for result in uko_results}, {"csp_afpc_sss_inc.uko_event.csv"})
+        self.assertEqual({result.iloc[0]["event_id"] for result in cards_results}, {cards_results[0].iloc[0]["event_id"]})
+        self.assertEqual({result.iloc[0]["event_id"] for result in uko_results}, {uko_results[0].iloc[0]["event_id"]})
+
+    def test_read_table_cards_event_client_fields(self) -> None:
+        """Проверяет клиентские поля и фильтрацию в cards_event.
+
+        Args:
+            Отсутствуют.
+
+        Returns:
+            None.
+        """
+
+        tool = build_fake_spark_tools(delay_seconds=0.0)[0]
+        result = asyncio.run(
+            tool.ainvoke(
+                {
+                    "table_name": "cspfs_repo_features3.cards_event",
+                    "select_columns": "event_id, epk_id, event_dt, transaction_amount_in_rub, type_operation",
+                    "filters": [
+                        {
+                            "column": "epk_id",
+                            "operator": "eq",
+                            "value": "2099007770421986000001",
+                        },
+                        {
+                            "column": "event_dt",
+                            "operator": "gte",
+                            "value": 20250728,
+                        },
+                    ],
+                    "max_rows": 1000,
+                }
+            )
+        )
+
+        self.assertIsInstance(result, pd.DataFrame)
+        self.assertGreater(len(result), 0)
+        self.assertEqual(
+            list(result.columns),
+            ["event_id", "epk_id", "event_dt", "transaction_amount_in_rub", "type_operation"],
+        )
+        self.assertTrue((result["epk_id"].astype(str) == "2099007770421986000001").all())
+        self.assertTrue((pd.to_numeric(result["event_dt"]) >= 20250728).all())
+
+    def test_read_table_applies_filters(self) -> None:
         """Проверяет фильтрацию строк по переданным ограничениям.
 
         Args:
@@ -97,7 +186,7 @@ class FakeSparkToolsTests(unittest.TestCase):
         for value in result["epk_id"]:
             self.assertEqual(str(value), "2099007770421986000001")
 
-    def test_spark_query_table_returns_schema_for_missing_column(self) -> None:
+    def test_read_table_returns_schema_for_missing_column(self) -> None:
         """Проверяет возврат схемы таблицы при несуществующем поле.
 
         Args:
@@ -118,13 +207,11 @@ class FakeSparkToolsTests(unittest.TestCase):
             )
         )
 
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["error"]["code"], "unknown_columns")
-        self.assertEqual(result["error"]["missing_columns"], ["missing_field"])
-        self.assertIn("schema", result)
-        self.assertGreater(result["schema"]["columns_count"], 0)
+        self.assertTrue(is_tool_error_result(result))
+        self.assertIn("missing_field", result)
+        self.assertIn("Доступные поля", result)
 
-    def test_spark_query_table_returns_available_tables_for_unknown_table(self) -> None:
+    def test_read_table_returns_available_tables_for_unknown_table(self) -> None:
         """Проверяет ошибку и список таблиц при неизвестной таблице.
 
         Args:
@@ -137,11 +224,10 @@ class FakeSparkToolsTests(unittest.TestCase):
         tool = build_fake_spark_tools(delay_seconds=0.0)[0]
         result = asyncio.run(tool.ainvoke({"table_name": "unknown_table"}))
 
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["error"]["code"], "unknown_table")
-        self.assertIn("hits", result["error"]["available_tables"])
+        self.assertTrue(is_tool_error_result(result))
+        self.assertIn("hits", result)
 
-    def test_spark_query_table_requires_explicit_columns(self) -> None:
+    def test_read_table_requires_explicit_columns(self) -> None:
         """Проверяет запрет выгрузки всех колонок без явного списка.
 
         Args:
@@ -154,11 +240,10 @@ class FakeSparkToolsTests(unittest.TestCase):
         tool = build_fake_spark_tools(delay_seconds=0.0)[0]
         result = asyncio.run(tool.ainvoke({"table_name": "hits", "select_columns": ""}))
 
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["error"]["code"], "select_columns_required")
-        self.assertIn("schema", result)
+        self.assertTrue(is_tool_error_result(result))
+        self.assertIn("Доступные поля", result)
 
-    def test_spark_query_table_rejects_select_all_marker(self) -> None:
+    def test_read_table_rejects_select_all_marker(self) -> None:
         """Проверяет запрет маркеров выбора всех колонок.
 
         Args:
@@ -171,11 +256,10 @@ class FakeSparkToolsTests(unittest.TestCase):
         tool = build_fake_spark_tools(delay_seconds=0.0)[0]
         result = asyncio.run(tool.ainvoke({"table_name": "hits", "select_columns": "*"}))
 
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["error"]["code"], "select_all_forbidden")
-        self.assertIn("schema", result)
+        self.assertTrue(is_tool_error_result(result))
+        self.assertIn("Доступные поля", result)
 
-    def test_spark_query_table_schema_models(self) -> None:
+    def test_read_table_schema_models(self) -> None:
         """Проверяет Pydantic-схемы универсального Spark-like инструмента.
 
         Args:

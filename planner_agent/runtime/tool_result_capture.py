@@ -14,6 +14,8 @@
 - _result_kind_and_mime: определение типа artifact.
 - _build_variable_name: формирование имени sandbox-переменной для DataFrame artifact.
 - _safe_filename_fragment: безопасный фрагмент имени файла.
+- _xml_text: экранирование значения для XML-подобного ответа модели.
+- _xml_json: сериализация структуры для XML-подобного ответа модели.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import csv
 import io
 import json
 import re
+from html import escape
 from pathlib import Path
 from typing import Any
 
@@ -272,8 +275,7 @@ def format_artifact_reference(
         f"has_nan_by_column: {serialize_tool_result(result_meta['has_nan_by_column'], max_chars=2_000)}\n\n"
         "important: The preview below is not the full tool result. "
         "Do not present conclusions based only on this preview as complete. "
-        "Use artifact tools to inspect or profile the full artifact when "
-        "full-data claims are required.\n\n"
+        "Use only data already present in task context for full-data claims.\n\n"
         f"preview_line: {preview_line}"
     )
 
@@ -904,34 +906,53 @@ def _format_dataframe_artifact_reference(
     """
 
     return (
-        "DataFrame result was saved as an artifact.\n\n"
-        "Схема загруженного из инстурмента dataframe: "
-        f"{serialize_tool_result(result_meta['column_types'], max_chars=4_000)}. "
-        f"название файла с datafrme  - {artifact.artifact_id}.csv. "
-        "Для того чтобы загрузить dataframe вы должны использовать инструмент - "
-        f"{artifact.metadata.get('tool_name') or ''}\n"
-        "data_scope: dataframe_metadata_only\n"
-        "full_result_available_in_artifact: true\n"
-        "worker_disclosure_required: false\n"
-        f"reason: {reason}\n"
-        f"artifact_id: {artifact.artifact_id}\n"
-        f"variable_name: {artifact.metadata.get('variable_name') or ''}\n"
-        f"sandbox_variable_name: {artifact.metadata.get('sandbox_variable_name') or ''}\n"
-        f"kind: {artifact.kind}\n"
-        f"uri: {artifact.uri}\n"
-        f"mime_type: {artifact.mime_type}\n"
-        f"original_size_estimate_chars: {original_size_estimate}\n"
-        f"row_count: {result_meta['row_count']}\n"
-        f"column_count: {result_meta['column_count']}\n"
-        f"columns: {serialize_tool_result(result_meta['columns'], max_chars=4_000)}\n"
-        f"column_types: {serialize_tool_result(result_meta['column_types'], max_chars=4_000)}\n"
-        f"preview_row: {result_meta.get('preview_row') or ''}\n"
-        f"has_empty_values: {str(result_meta['has_empty_values']).lower()}\n"
-        "has_empty_values_by_column: "
-        f"{serialize_tool_result(result_meta['has_empty_values_by_column'], max_chars=4_000)}\n"
-        "empty_value_counts_by_column: "
-        f"{serialize_tool_result(result_meta['empty_value_counts_by_column'], max_chars=4_000)}"
+        "<tool_result>\n"
+        "  <status>success</status>\n"
+        "  <dataframe_preview>\n"
+        f"    <preview_row>{_xml_text(result_meta.get('preview_row') or '')}</preview_row>\n"
+        "  </dataframe_preview>\n"
+        "  <data_description>\n"
+        f"    <row_count>{int(result_meta['row_count'])}</row_count>\n"
+        f"    <column_count>{int(result_meta['column_count'])}</column_count>\n"
+        f"    <columns>{_xml_json(result_meta['columns'], max_chars=4_000)}</columns>\n"
+        f"    <column_types>{_xml_json(result_meta['column_types'], max_chars=4_000)}</column_types>\n"
+        f"    <has_empty_values>{str(result_meta['has_empty_values']).lower()}</has_empty_values>\n"
+        "    <has_empty_values_by_column>"
+        f"{_xml_json(result_meta['has_empty_values_by_column'], max_chars=4_000)}"
+        "</has_empty_values_by_column>\n"
+        "    <empty_value_counts_by_column>"
+        f"{_xml_json(result_meta['empty_value_counts_by_column'], max_chars=4_000)}"
+        "</empty_value_counts_by_column>\n"
+        "  </data_description>\n"
+        "</tool_result>"
     )
+
+
+def _xml_text(value: Any) -> str:
+    """Экранирует значение для безопасной вставки в XML-подобный текст.
+
+    Args:
+        value: Произвольное значение, которое нужно показать модели.
+
+    Returns:
+        Строка с экранированными символами XML.
+    """
+
+    return escape("" if value is None else str(value), quote=False)
+
+
+def _xml_json(value: Any, *, max_chars: int) -> str:
+    """Сериализует структуру и экранирует ее для XML-подобного текста.
+
+    Args:
+        value: Список, словарь или другое значение для JSON-представления.
+        max_chars: Максимальная длина сериализованного текста.
+
+    Returns:
+        Экранированная JSON-строка в заданном лимите.
+    """
+
+    return _xml_text(serialize_tool_result(value, max_chars=max_chars))
 
 
 def _build_variable_name(label: str) -> str:

@@ -20,18 +20,17 @@ from langgraph.types import Command, Send
 
 from ..models import CriticPayload, Task, TaskStatus, WorkerPayload
 from ..runtime.sandbox import PythonSandboxProtocol
+from ..runtime.tool_text import is_tool_error_result
 from ..schemas.lineage import StateNode
 from ..services.artifact_service import ArtifactService
 from ..services.lineage_service import LineageService
 from ..services.prompt_trace_service import write_prompt_trace, write_tool_calls_trace
 from ..services.skills_service import SkillsService
-from ..tools.artifact_read_tools import build_artifact_read_tools
 from ..tools.artifact_wrappers import wrap_tools_for_artifacts
 
 # Ключи LangGraph Pregel для чтения актуального AgentState из worker-узла (см. CONFIG_KEY_*).
 _CONFIGURABLE_KEY = "configurable"
 _PREGEL_READ_KEY = "__pregel_read"
-SKILL_READ_TOOL_NAMES: frozenset[str] = frozenset({"skill_list", "skill_view"})
 
 
 def _initial_user_query_from_graph_state(config: RunnableConfig | None) -> str:
@@ -218,7 +217,7 @@ def _format_worker_console_result(
     Args:
         task: Выполненная задача worker-а.
         selected_tools: Domain/source tools, выбранные для задачи.
-        prepared_tools: Итоговый список tools, включая runtime artifact tools.
+        prepared_tools: Итоговый список tools, включая runtime file tools.
 
     Returns:
         Многострочная строка с задачей, статусом, tools, результатом и ошибкой.
@@ -264,7 +263,7 @@ def _supports_with_context(tool: BaseTool) -> bool:
 
 
 def _select_task_tools(tools: list[BaseTool], task: Task) -> list[BaseTool]:
-    """Выбирает все worker-инструменты, кроме инструментов чтения skills.
+    """Возвращает инструменты, доступные worker-у для выполнения задачи.
 
     Args:
         tools: Полный список domain/source/tools, доступных агенту.
@@ -272,17 +271,13 @@ def _select_task_tools(tools: list[BaseTool], task: Task) -> list[BaseTool]:
             с прежним контрактом выбора инструментов.
 
     Returns:
-        Список всех инструментов, которые worker может использовать напрямую.
-        ``skill_list`` и ``skill_view`` исключаются: skills выбирает planner,
-        а worker получает только уже загруженные ``suggested_skills``.
+        Список всех инструментов, которые worker может использовать напрямую,
+        включая ``list_skills`` и ``load_skill`` для самостоятельной загрузки
+        релевантных skills по индексу.
     """
 
     del task
-    return [
-        tool
-        for tool in tools
-        if tool.name not in SKILL_READ_TOOL_NAMES
-    ]
+    return list(tools)
 
 
 async def _prepare_tools(tools: list[BaseTool], task: Task) -> list[BaseTool]:
@@ -331,7 +326,7 @@ def _format_installed_packages(packages: dict[str, str]) -> str:
     lines = [
         "<available_python_packages>",
         "Ниже перечислены библиотеки, доступные для импорта в sandbox-окружении. "
-        "Используй их при выполнении Python-кода через инструмент python_analysis.",
+        "Используй их при выполнении Python-кода через инструмент execute_python_code.",
         "",
     ]
     package_names = _select_installed_package_names(packages)
@@ -397,6 +392,7 @@ async def _create_worker_system_prompt(
             _format_dependency_context(payload.dependency_context),
             _format_filesystem_context(payload.filesystem_context),
             _format_artifact_context(payload.artifact_context),
+            _format_available_skill_index(payload.skill_previews),
             _format_loaded_skills(loaded_skills or {}),
             _format_installed_packages(installed_packages or {}),
         )
@@ -443,6 +439,38 @@ def _format_task_contract(task: Task) -> str:
             f"</TASK {task_id}>",
         ]
     )
+
+
+def _format_available_skill_index(skill_previews: dict[str, str]) -> str:
+    """Формирует индекс доступных skills для worker prompt.
+
+    Args:
+        skill_previews: Словарь ``{skill_name: preview}`` со всеми доступными
+            skills и краткими описаниями.
+
+    Returns:
+        XML-подобный блок с индексом skills и правилом точечной загрузки через
+        ``load_skill`` или пустую строку, если индекс недоступен.
+    """
+
+    if not skill_previews:
+        return ""
+
+    lines = [
+        "<available_skill_index>",
+        "Ниже перечислены skills, доступные для этой задачи. "
+        "Если описание задачи или ошибка инструмента указывает на доменную "
+        "логику, источники данных, join-правила или терминологию, сначала "
+        "выбери релевантный skill из индекса и загрузи его полное содержимое "
+        "через tool load_skill. Не читай prompt/artifact traces ради skills.",
+    ]
+    for skill_name, preview in sorted(skill_previews.items()):
+        clean_name = str(skill_name).strip()
+        clean_preview = str(preview).strip()
+        if clean_name:
+            lines.append(f"- {clean_name}: {clean_preview}")
+    lines.append("</available_skill_index>")
+    return "\n".join(lines)
 
 
 def _format_resolved_inputs(resolved_inputs: dict[str, Any]) -> str:
@@ -554,8 +582,9 @@ def _format_artifact_context(artifact_context: dict[str, Any]) -> str:
                 "Схема загруженного из инстурмента dataframe: "
                 f"{schema_line}. "
                 f"название файла с datafrme  - {dataframe_file_name or artifact_name}. "
-                "Для того чтобы загрузить dataframe вы должны использовать "
-                f"инструмент - {tool_name or 'artifact_read_tools'}"
+                "Для дальнейших расчетов используй уже загруженную sandbox-переменную, "
+                "если она указана в контексте; иначе повтори минимальный запрос через "
+                f"{tool_name or 'read_table'}."
             )
             lines.append(f"schema: {schema_line}")
             if preview_row:
@@ -613,6 +642,39 @@ def _format_loaded_skills(loaded_skills: dict[str, str]) -> str:
     return "\n".join(blocks)
 
 
+def _extract_python_tool_payload(raw_output: str) -> dict[str, Any] | None:
+    """Извлекает JSON-ответ execute_python_code из сырого или обернутого вывода.
+
+    Args:
+        raw_output: Текст ToolMessage после wrapper-а или сырой JSON tool.
+
+    Returns:
+        Словарь результата Python-инструмента или ``None``.
+    """
+
+    try:
+        parsed = json.loads(raw_output)
+    except Exception:
+        parsed = None
+    if isinstance(parsed, dict) and "success" in parsed:
+        return parsed
+
+    marker = "Данные:\n"
+    if marker not in raw_output:
+        return None
+    json_part = raw_output.split(marker, 1)[1]
+    footer = "\n\nДальше:"
+    if footer in json_part:
+        json_part = json_part.split(footer, 1)[0]
+    try:
+        parsed = json.loads(json_part.strip())
+    except Exception:
+        return None
+    if isinstance(parsed, dict) and "success" in parsed:
+        return parsed
+    return None
+
+
 async def _apply_tool_output(task: Task, raw_output: str) -> bool:
     """
     Разбирает вывод инструмента и обновляет состояние задачи.
@@ -625,10 +687,20 @@ async def _apply_tool_output(task: Task, raw_output: str) -> bool:
     :param raw_output: Строковый вывод инструмента.
     :return: ``True`` при успешном выполнении инструмента, ``False`` при ошибке.
     """
+    if is_tool_error_result(raw_output):
+        task.result_preview = _limit_text(str(raw_output), max_chars=RESULT_PREVIEW_MAX_LEN)
+        task.error_log = task.result_preview
+        return False
+
+    python_payload = _extract_python_tool_payload(raw_output)
+    if python_payload is not None:
+        raw_output = json.dumps(python_payload, ensure_ascii=False)
+
     try:
         parsed = json.loads(raw_output)
     except Exception:
-        # Не JSON — сохраняем как есть
+        # Не JSON — сохраняем как есть. Ошибку определяем только по внутреннему
+        # признаку результата, а не по вхождению строк в текст.
         task.result_preview = _limit_text(raw_output, max_chars=RESULT_PREVIEW_MAX_LEN)
         task.error_log = None
         return True
@@ -639,10 +711,12 @@ async def _apply_tool_output(task: Task, raw_output: str) -> bool:
         if parsed.get("target_variable"):
             task.output_variable_name = parsed.get("target_variable")
         if parsed["success"]:
-            task.result_preview = (
-                    parsed.get("variable_preview")
-                    or parsed.get("message")
-                    or "OK"
+            task.result_preview = _limit_text(
+                parsed.get("variable_preview")
+                or parsed.get("execution_output")
+                or parsed.get("message")
+                or "OK",
+                max_chars=RESULT_PREVIEW_MAX_LEN,
             )
             task.error_log = None
             return True
@@ -975,13 +1049,8 @@ async def worker_node(
     )
 
     selected_tools = _select_task_tools(tools, task)
-    runtime_tools = _with_artifact_read_tools(
-        tools=selected_tools,
-        artifact_service=artifact_service,
-        run_id=payload.run_id,
-    )
     # Подготовка инструментов с контекстом текущей задачи
-    prepared_tools = await _prepare_tools(runtime_tools, task)
+    prepared_tools = await _prepare_tools(selected_tools, task)
     prepared_tools = wrap_tools_for_artifacts(
         tools=prepared_tools,
         artifact_service=artifact_service,
@@ -1017,6 +1086,7 @@ async def worker_node(
             "resolved_inputs": payload.resolved_inputs,
             "dependency_context": payload.dependency_context,
             "artifact_context": payload.artifact_context,
+            "skill_previews": payload.skill_previews,
             "loaded_skill_names": list(loaded_skills.keys()),
         },
     )
@@ -1160,38 +1230,6 @@ def _shrink_task_for_state(task: Task) -> None:
         )
     if task.error_log:
         task.error_log = _limit_text(task.error_log, max_chars=WORKER_LOG_MAX_LEN)
-
-
-def _with_artifact_read_tools(
-        *,
-        tools: list[BaseTool],
-        artifact_service: ArtifactService | None,
-        run_id: str,
-) -> list[BaseTool]:
-    """Добавляет runtime tools для чтения artifacts в текущем ResearchRun.
-
-    Args:
-        tools: Базовый список tools worker.
-        artifact_service: Сервис artifacts или ``None``.
-        run_id: Идентификатор текущего ResearchRun.
-
-    Returns:
-        Список tools с добавленными artifact_list/artifact_preview/artifact_read_chunk.
-    """
-
-    if artifact_service is None or not run_id:
-        return tools
-
-    existing_names = {tool.name for tool in tools}
-    artifact_tools = [
-        tool
-        for tool in build_artifact_read_tools(
-            artifact_service=artifact_service,
-            run_id=run_id,
-        )
-        if tool.name not in existing_names
-    ]
-    return [*tools, *artifact_tools]
 
 
 def _create_worker_started_lineage(

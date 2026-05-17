@@ -23,7 +23,8 @@ model = ChatOpenAI(
     # google/gemini-3-pro-preview
     #model="google/gemini-2.5-flash",
     #model="deepseek/deepseek-v4-flash",
-    model="google/gemini-2.5-flash",
+    #model="google/gemini-2.5-flash",
+    model="openrouter/owl-alpha",
     # model="kwaipilot/kat-coder-pro:free",
     temperature=0.1,
     timeout=120,

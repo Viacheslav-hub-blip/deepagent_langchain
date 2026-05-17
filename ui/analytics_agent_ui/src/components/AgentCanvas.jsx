@@ -9,6 +9,8 @@
  * - buildGraphLayout: рассчитывает позиции узлов и связи.
  * - buildActiveBranch: выделяет активную ветку узлов.
  * - calculateFitZoom: рассчитывает масштаб по размеру контейнера.
+ * - captureViewportCenter: запоминает центр текущего scroll viewport.
+ * - restoreViewportCenter: восстанавливает центр viewport после изменения масштаба.
  * - centerGraph: центрирует граф в scroll-контейнере.
  * - AgentCanvas: отображает интерактивный граф выполнения агента.
  */
@@ -19,9 +21,10 @@ import { BranchPopover } from "./BranchPopover.jsx";
 import { NodeCard } from "./NodeCard.jsx";
 
 const CARD_WIDTH = 280;
-const CARD_HEIGHT = 188;
+const CARD_HEIGHT = 132;
+const MIN_GRAPH_WIDTH = 760;
 const H_GAP = 64;
-const V_GAP = 92;
+const V_GAP = 72;
 const PAD_X = 64;
 const PAD_Y = 58;
 const BRANCH_POPOVER_WIDTH = 340;
@@ -102,7 +105,7 @@ function buildGraphLayout(nodes) {
 
   // Graph width is based only on node content. Row labels are overlays,
   // so they no longer push the graph to the right.
-  const width = Math.max(920, PAD_X * 2 + maxRowWidth);
+  const width = Math.max(MIN_GRAPH_WIDTH, PAD_X * 2 + maxRowWidth);
   const height = PAD_Y * 2 + sortedRows.length * CARD_HEIGHT + Math.max(0, sortedRows.length - 1) * V_GAP;
 
   const positions = new Map();
@@ -217,6 +220,45 @@ function calculateFitZoom(container, width, height) {
   return clampZoom(zoom);
 }
 
+/**
+ * Запоминает центр видимой области как долю scroll-содержимого.
+ *
+ * @param {HTMLElement | null} container Scroll-контейнер графа.
+ * @returns {object} Относительная позиция центра viewport.
+ */
+function captureViewportCenter(container) {
+  if (!container || !container.scrollWidth || !container.scrollHeight) {
+    return { x: 0.5, y: 0.5 };
+  }
+
+  return {
+    x: (container.scrollLeft + container.clientWidth / 2) / container.scrollWidth,
+    y: (container.scrollTop + container.clientHeight / 2) / container.scrollHeight,
+  };
+}
+
+/**
+ * Восстанавливает центр видимой области после пересчета размеров графа.
+ *
+ * @param {HTMLElement | null} container Scroll-контейнер графа.
+ * @param {object} center Относительная позиция центра viewport.
+ * @returns {void}
+ */
+function restoreViewportCenter(container, center) {
+  if (!container) {
+    return;
+  }
+
+  const left = Math.max(0, center.x * container.scrollWidth - container.clientWidth / 2);
+  const top = Math.max(0, center.y * container.scrollHeight - container.clientHeight / 2);
+
+  container.scrollTo({
+    left,
+    top,
+    behavior: "auto",
+  });
+}
+
 function centerGraph(container) {
   if (!container) {
     return;
@@ -314,11 +356,16 @@ export function AgentCanvas({ nodes, selectedNodeId, onSelectNode, onCreateBranc
   }, [nodes, branchTargetId]);
 
   const applyZoom = (nextZoom, mode = "manual") => {
+    const container = scrollRef.current;
+    const center = captureViewportCenter(container);
     zoomModeRef.current = mode;
-    setZoom(clampZoom(nextZoom));
+    setZoom((currentZoom) => {
+      const resolvedZoom = typeof nextZoom === "function" ? nextZoom(currentZoom) : nextZoom;
+      return clampZoom(resolvedZoom);
+    });
 
     window.requestAnimationFrame(() => {
-      centerGraph(scrollRef.current);
+      restoreViewportCenter(container, center);
     });
   };
 
@@ -327,8 +374,8 @@ export function AgentCanvas({ nodes, selectedNodeId, onSelectNode, onCreateBranc
     applyZoom(nextZoom, "fit");
   };
 
-  const zoomIn = () => applyZoom(zoom + ZOOM_STEP);
-  const zoomOut = () => applyZoom(zoom - ZOOM_STEP);
+  const zoomIn = () => applyZoom((currentZoom) => currentZoom + ZOOM_STEP);
+  const zoomOut = () => applyZoom((currentZoom) => currentZoom - ZOOM_STEP);
   const resetZoom = () => applyZoom(1);
 
   useEffect(() => {
@@ -575,7 +622,7 @@ export function AgentCanvas({ nodes, selectedNodeId, onSelectNode, onCreateBranc
                         }
                       }}
                       className="graph-node"
-                      style={{ left: `${x}px`, top: `${y}px`, width: `${CARD_WIDTH}px` }}
+                      style={{ left: `${x}px`, top: `${y}px`, width: `${CARD_WIDTH}px`, height: `${CARD_HEIGHT}px` }}
                       initial={{ opacity: 0, y: 28, scale: 0.94, filter: "blur(8px)" }}
                       animate={{ opacity: 1, y: 0, scale: 1, filter: "blur(0px)" }}
                       exit={{ opacity: 0, scale: 0.96 }}

@@ -3,6 +3,8 @@
 Содержит:
 - _resolve_directory: нормализация директорий относительно workspace.
 - _prepare_worker_tools: подготовка LangChain tools и оборачивание генераторов кода.
+- _filter_worker_tools: ограничение набора worker-инструментов публичным контрактом.
+- _configure_sandbox_working_directory: настройка cwd sandbox для execute_python_code.
 - planner_agent: сборка LangGraph workflow с сервисами, tools и nodes.
 """
 
@@ -29,12 +31,23 @@ from .services.artifact_service import ArtifactService
 from .services.lineage_service import LineageService
 from .services.memory_service import MemoryService
 from .services.skills_service import SkillsService
-from .toolkits.workspace_toolkit import build_workspace_tools
 from .tools.python_analysis_tool import (
     PYTHON_ANALYSIS_TOOL_NAME,
     build_python_analysis_tool,
 )
 from .tools.registry import ToolRegistry
+from .tools.skill_tools import build_skill_read_tools
+
+PUBLIC_WORKER_TOOL_NAMES: frozenset[str] = frozenset(
+    {"execute_python_code", "read_table", "list_skills", "load_skill"}
+)
+
+LEGACY_TOOL_NAME_ALIASES: dict[str, str] = {
+    "python_analysis": PYTHON_ANALYSIS_TOOL_NAME,
+    "spark_query_table": "read_table",
+    "skill_list": "list_skills",
+    "skill_view": "load_skill",
+}
 
 
 def _resolve_directory(
@@ -88,6 +101,26 @@ def _prepare_worker_tools(
     return prepared
 
 
+def _filter_worker_tools(tools: list[BaseTool]) -> list[BaseTool]:
+    """Оставляет только публично разрешенные worker-инструменты.
+
+    Args:
+        tools: Полный список собранных LangChain tools.
+
+    Returns:
+        Список tools с именами из ``PUBLIC_WORKER_TOOL_NAMES`` без дублей.
+    """
+
+    selected: list[BaseTool] = []
+    seen: set[str] = set()
+    for tool in tools:
+        if tool.name not in PUBLIC_WORKER_TOOL_NAMES or tool.name in seen:
+            continue
+        selected.append(tool)
+        seen.add(tool.name)
+    return selected
+
+
 def _normalize_enabled_tool_names(
         enabled_tool_names: Optional[Set[str]],
         code_generator_tool_names: set[str],
@@ -99,17 +132,42 @@ def _normalize_enabled_tool_names(
         code_generator_tool_names: Legacy-имена внешних генераторов кода.
 
     Returns:
-        Набор имен, где legacy-генераторы заменены на ``python_analysis``,
+        Набор имен, где legacy-генераторы заменены на ``execute_python_code``,
         или ``None`` при отсутствии явного фильтра.
     """
 
     if enabled_tool_names is None:
         return None
-    normalized = set(enabled_tool_names)
+    normalized = {
+        LEGACY_TOOL_NAME_ALIASES.get(name, name)
+        for name in enabled_tool_names
+    }
     if normalized.intersection(code_generator_tool_names):
         normalized.difference_update(code_generator_tool_names)
         normalized.add(PYTHON_ANALYSIS_TOOL_NAME)
     return normalized
+
+
+def _configure_sandbox_working_directory(sandbox: Any, workspace_path: Path) -> None:
+    """Настраивает рабочую директорию sandbox для относительных путей в коде.
+
+    Args:
+        sandbox: Объект песочницы, переданный в агент.
+        workspace_path: Абсолютный путь workspace, относительно которого должны
+            резолвиться имена файлов внутри ``execute_python_code``.
+
+    Returns:
+        ``None``. Функция изменяет sandbox на месте, если это поддерживается.
+    """
+
+    setter = getattr(sandbox, "set_working_directory", None)
+    if callable(setter):
+        setter(workspace_path)
+        return
+    try:
+        setattr(sandbox, "working_directory", workspace_path)
+    except Exception:
+        return
 
 
 def planner_agent(
@@ -162,6 +220,7 @@ def planner_agent(
         prompts = AnalysisAgentPrompts()
 
     workspace_path = Path(workspace_root).resolve()
+    _configure_sandbox_working_directory(sandbox, workspace_path)
     resolved_sources_dir = _resolve_directory(
         workspace_root=workspace_path,
         directory=sources_dir,
@@ -198,14 +257,10 @@ def planner_agent(
         code_generator_tool_names=set(code_generator_tool_names),
     )
 
-    if enable_workspace_tools:
-        workspace_tools = build_workspace_tools(
-            sandbox=sandbox,
-            workspace_root=str(workspace_path),
-            sources_dir=str(resolved_sources_dir),
-            contexts_dir=str(resolved_contexts_dir),
-        )
-        final_worker_tools.extend(workspace_tools)
+    del enable_workspace_tools
+
+    final_worker_tools.extend(build_skill_read_tools(final_skills_service))
+    final_worker_tools = _filter_worker_tools(final_worker_tools)
 
     final_tool_registry = tool_registry or ToolRegistry()
     final_tool_registry.register_many(final_worker_tools)
@@ -213,7 +268,8 @@ def planner_agent(
         _normalize_enabled_tool_names(
             enabled_tool_names,
             set(code_generator_tool_names),
-        )
+        ),
+        strict=False,
     )
 
     fs_context = {

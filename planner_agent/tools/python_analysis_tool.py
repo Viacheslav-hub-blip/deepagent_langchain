@@ -9,8 +9,10 @@
 - _validate_code_policy: статическая проверка кода перед выполнением.
 - _ensure_common_libraries: добавление популярных аналитических библиотек в sandbox.
 - _execute_python_code: компиляция и выполнение кода в sandbox.
-- _python_error_possible_causes: вероятные причины ошибки python_analysis.
-- _python_error_solution_options: варианты исправления ошибки python_analysis.
+- _sandbox_working_directory: получение рабочей директории sandbox.
+- _temporary_working_directory: временная смена cwd на время выполнения кода.
+- _python_error_possible_causes: вероятные причины ошибки execute_python_code.
+- _python_error_solution_options: варианты исправления ошибки execute_python_code.
 - _python_retry_guidance: краткая инструкция по retry после ошибки.
 - _preview_value: компактный предпросмотр значения для ответа модели.
 - _json_default: сериализация нестандартных объектов в JSON.
@@ -25,8 +27,11 @@ import contextlib
 import io
 import json
 import keyword
+import os
+import threading
 import traceback
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from langchain_core.tools import BaseTool
@@ -34,11 +39,12 @@ from pydantic import BaseModel, Field, PrivateAttr
 
 from ..runtime.sandbox import PythonSandboxProtocol
 
-PYTHON_ANALYSIS_TOOL_NAME = "python_analysis"
+PYTHON_ANALYSIS_TOOL_NAME = "execute_python_code"
 MAX_CODE_CHARS = 50_000
 MAX_TEXT_PREVIEW_CHARS = 4_000
 MAX_STDIO_CHARS = 8_000
 MAX_DATAFRAME_PREVIEW_ROWS = 10
+_CWD_EXECUTION_LOCK_ATTR = "_analitic_agent_sandbox_cwd_lock"
 
 ALLOWED_IMPORT_ROOTS: frozenset[str] = frozenset(
     {
@@ -89,19 +95,23 @@ class PythonAnalysisInput(BaseModel):
 
     Attributes:
         code: Python-код, который нужно выполнить в текущем sandbox агента.
-        target_variable: Имя переменной, которую код обязан создать или обновить.
+        target_variable: Опциональное имя переменной, которую код должен создать.
         description: Краткое описание цели кода для трассировки и самопроверки.
     """
 
     code: str = Field(
         description=(
-            "Python code to compile and execute. The code must use existing "
-            "sandbox variables from the task context and create target_variable."
+            "Python code to compile and execute. Use existing sandbox variables "
+            "from the task context. Optionally assign the main result to "
+            "target_variable; otherwise use print() and read execution_output."
         ),
     )
-    target_variable: str = Field(
-        default="result",
-        description="Name of the variable that the code must create or update.",
+    target_variable: str | None = Field(
+        default=None,
+        description=(
+            "Optional name of the variable that the code must create or update. "
+            "Omit when the goal is console output or side effects on other variables."
+        ),
     )
     description: str = Field(
         default="",
@@ -170,9 +180,10 @@ class PythonAnalysisTool(BaseTool):
         "Compile and execute Python code in the agent sandbox. Use this tool for "
         "calculations, joins, aggregations, statistics, tabular transformations "
         "and chart/data preparation over variables that already exist in the "
-        "task context. The code must create target_variable. The tool returns "
-        "structured JSON with generated_code, preview, stdout/stderr and full "
-        "traceback when execution fails, so you can fix the code and retry."
+        "task context. target_variable is optional: omit it for print()-based "
+        "exploration and read execution_output; set it when you need a named "
+        "result variable. Returns structured JSON with generated_code, preview, "
+        "stdout/stderr and full traceback when execution fails."
     )
     args_schema: type[BaseModel] = PythonAnalysisInput
 
@@ -228,7 +239,7 @@ class PythonAnalysisTool(BaseTool):
     def _run(
         self,
         code: str,
-        target_variable: str = "result",
+        target_variable: str | None = None,
         description: str = "",
         **_: Any,
     ) -> str:
@@ -255,7 +266,7 @@ class PythonAnalysisTool(BaseTool):
     async def _arun(
         self,
         code: str,
-        target_variable: str = "result",
+        target_variable: str | None = None,
         description: str = "",
         **_: Any,
     ) -> str:
@@ -277,11 +288,11 @@ class PythonAnalysisTool(BaseTool):
             target_variable=target_variable,
             description=description,
         )
-        if result.success:
-            value = self._sandbox.globals.get(target_variable)
+        if result.success and result.target_variable:
+            value = self._sandbox.globals.get(result.target_variable)
             add_variable = getattr(self._sandbox, "add_variable", None)
             if callable(add_variable):
-                await add_variable(target_variable, value)
+                await add_variable(result.target_variable, value)
         return result.to_json()
 
 
@@ -298,23 +309,23 @@ def build_python_analysis_tool(sandbox: PythonSandboxProtocol) -> PythonAnalysis
     return PythonAnalysisTool(sandbox=sandbox)
 
 
-def _validate_target_variable(target_variable: str) -> str:
-    """Проверяет и нормализует имя целевой переменной результата.
+def _normalize_target_variable(target_variable: str | None) -> str | None:
+    """Проверяет и нормализует опциональное имя целевой переменной результата.
 
     Args:
-        target_variable: Имя переменной, переданное моделью.
+        target_variable: Имя переменной, переданное моделью, или ``None``.
 
     Returns:
-        Очищенное имя переменной.
+        Очищенное имя переменной или ``None``, если переменная не запрошена.
 
     Raises:
-        ValueError: Если имя пустое, не является Python-идентификатором или
+        ValueError: Если имя не пустое, но не является Python-идентификатором или
             совпадает с ключевым словом Python.
     """
 
     name = str(target_variable or "").strip()
     if not name:
-        raise ValueError("target_variable is required")
+        return None
     if not name.isidentifier() or keyword.iskeyword(name):
         raise ValueError(
             "target_variable must be a valid Python identifier, for example result_df"
@@ -326,7 +337,7 @@ def _normalize_code_text(code: str) -> str:
     """Нормализует текст Python-кода перед валидацией.
 
     Args:
-        code: Исходный текст кода, переданный моделью в ``python_analysis``.
+        code: Исходный текст кода, переданный моделью в ``execute_python_code``.
 
     Returns:
         Код без изменений, если он уже синтаксически корректен, либо код с
@@ -384,17 +395,17 @@ def _validate_code_policy(code: str) -> None:
                 root = module_name.split(".", maxsplit=1)[0]
                 if root not in ALLOWED_IMPORT_ROOTS:
                     raise ValueError(
-                        f"Import '{module_name}' is not allowed in python_analysis"
+                        f"Import '{module_name}' is not allowed in execute_python_code"
                     )
         if isinstance(node, ast.Call):
             call_name = _call_name(node.func)
             if call_name in DENIED_CALL_NAMES:
-                raise ValueError(f"Call '{call_name}' is not allowed in python_analysis")
+                raise ValueError(f"Call '{call_name}' is not allowed in execute_python_code")
             attr_call = _attribute_call_name(node.func)
             if attr_call in DENIED_ATTRIBUTE_CALLS:
                 owner, attr = attr_call
                 raise ValueError(
-                    f"Call '{owner}.{attr}' is not allowed in python_analysis"
+                    f"Call '{owner}.{attr}' is not allowed in execute_python_code"
                 )
 
 
@@ -426,7 +437,7 @@ def _execute_python_code(
     *,
     sandbox: PythonSandboxProtocol,
     code: str,
-    target_variable: str,
+    target_variable: str | None = None,
     description: str = "",
 ) -> PythonExecutionResult:
     """Выполняет полный цикл проверки, компиляции и исполнения кода.
@@ -434,7 +445,7 @@ def _execute_python_code(
     Args:
         sandbox: Изолированная среда агента с общими переменными.
         code: Python-код для выполнения.
-        target_variable: Имя переменной, которую должен создать код.
+        target_variable: Опциональное имя переменной, которую должен создать код.
         description: Краткое описание цели выполнения.
 
     Returns:
@@ -443,9 +454,9 @@ def _execute_python_code(
 
     generated_code = _normalize_code_text(str(code or ""))
     try:
-        target_name = _validate_target_variable(target_variable)
+        target_name = _normalize_target_variable(target_variable)
         _validate_code_policy(generated_code)
-        compiled = compile(generated_code, "<python_analysis>", "exec")
+        compiled = compile(generated_code, "<execute_python_code>", "exec")
     except Exception as exc:
         return PythonExecutionResult(
             success=False,
@@ -466,7 +477,7 @@ def _execute_python_code(
             success=False,
             message="Sandbox does not expose a globals dictionary.",
             generated_code=generated_code,
-            target_variable=target_name,
+            target_variable=target_name or "",
             error="InvalidSandbox: sandbox.globals is not a dictionary",
             available_variables=[],
             possible_causes=["Sandbox не предоставляет словарь globals для выполнения кода."],
@@ -478,14 +489,18 @@ def _execute_python_code(
     stdout = io.StringIO()
     stderr = io.StringIO()
     try:
-        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        with (
+            _temporary_working_directory(_sandbox_working_directory(sandbox)),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
             exec(compiled, globals_dict, globals_dict)
     except Exception as exc:
         return PythonExecutionResult(
             success=False,
             message="Python code execution failed. Fix generated_code and retry.",
             generated_code=generated_code,
-            target_variable=target_name,
+            target_variable=target_name or "",
             execution_output=_combined_stdio(stdout, stderr),
             error=f"{exc.__class__.__name__}: {exc}",
             traceback_text=_limit_text(traceback.format_exc(), max_chars=MAX_STDIO_CHARS),
@@ -493,6 +508,23 @@ def _execute_python_code(
             possible_causes=_python_error_possible_causes(exc),
             solution_options=_python_error_solution_options(exc),
             retry_guidance=_python_retry_guidance(),
+        )
+
+    stdio = _combined_stdio(stdout, stderr)
+    purpose = f" Purpose: {description.strip()}" if description.strip() else ""
+
+    if target_name is None:
+        message = f"Python code executed successfully.{purpose}"
+        if stdio.strip():
+            message += " Use execution_output as the tool result."
+        return PythonExecutionResult(
+            success=True,
+            message=message,
+            generated_code=generated_code,
+            target_variable="",
+            variable_preview=_preview_stdio_result(stdio),
+            execution_output=stdio,
+            available_variables=_visible_variable_names(globals_dict),
         )
 
     if target_name not in globals_dict:
@@ -504,31 +536,99 @@ def _execute_python_code(
             ),
             generated_code=generated_code,
             target_variable=target_name,
-            execution_output=_combined_stdio(stdout, stderr),
+            execution_output=stdio,
             error=f"MissingTargetVariable: {target_name}",
             available_variables=_visible_variable_names(globals_dict),
             possible_causes=[
-                f"Код выполнился, но не создал обязательную переменную '{target_name}'.",
+                f"Код выполнился, но не создал переменную '{target_name}'.",
             ],
             solution_options=[
                 f"Добавь присваивание результата в переменную '{target_name}'.",
                 "Проверь, что присваивание выполняется на всех ветках кода.",
+                "Если достаточно stdout, повтори вызов без target_variable.",
             ],
             retry_guidance=_python_retry_guidance(),
         )
 
     value = globals_dict[target_name]
     _update_sandbox_last_variables(sandbox, target_name, value)
-    purpose = f" Purpose: {description.strip()}" if description.strip() else ""
     return PythonExecutionResult(
         success=True,
         message=f"Python code executed successfully.{purpose}",
         generated_code=generated_code,
         target_variable=target_name,
         variable_preview=_preview_value(value),
-        execution_output=_combined_stdio(stdout, stderr),
+        execution_output=stdio,
         available_variables=_visible_variable_names(globals_dict),
     )
+
+
+def _sandbox_working_directory(sandbox: PythonSandboxProtocol) -> Path | None:
+    """Возвращает рабочую директорию sandbox для относительных файловых путей.
+
+    Args:
+        sandbox: Объект песочницы, в котором может быть атрибут
+            ``working_directory`` или ``workspace_root``.
+
+    Returns:
+        Абсолютный путь рабочей директории или ``None``, если она не задана.
+    """
+
+    raw_directory = (
+        getattr(sandbox, "working_directory", None)
+        or getattr(sandbox, "workspace_root", None)
+    )
+    if raw_directory is None:
+        return None
+    directory_text = str(raw_directory).strip()
+    if not directory_text:
+        return None
+    return Path(directory_text).expanduser().resolve()
+
+
+@contextlib.contextmanager
+def _temporary_working_directory(directory: Path | None):
+    """Временно переключает текущую директорию процесса для выполнения кода.
+
+    Args:
+        directory: Рабочая директория для относительных файловых путей. Если
+            ``None``, текущая директория не меняется.
+
+    Yields:
+        ``None``. После выхода исходная директория процесса восстанавливается.
+    """
+
+    with _get_cwd_execution_lock():
+        if directory is None:
+            yield
+            return
+        if not directory.exists() or not directory.is_dir():
+            raise FileNotFoundError(f"Sandbox working directory does not exist: {directory}")
+
+        previous_directory = Path.cwd()
+        os.chdir(directory)
+        try:
+            yield
+        finally:
+            os.chdir(previous_directory)
+
+
+def _get_cwd_execution_lock() -> threading.RLock:
+    """Возвращает общий process-wide lock для временной смены cwd.
+
+    Args:
+        Отсутствуют. Lock хранится в ``builtins`` для совместного использования
+        разными sandbox-модулями.
+
+    Returns:
+        ``threading.RLock`` для защиты ``os.chdir`` и выполнения кода.
+    """
+
+    lock = getattr(builtins, _CWD_EXECUTION_LOCK_ATTR, None)
+    if lock is None:
+        lock = threading.RLock()
+        setattr(builtins, _CWD_EXECUTION_LOCK_ATTR, lock)
+    return lock
 
 
 def _call_name(func: ast.AST) -> str:
@@ -586,6 +686,22 @@ def _update_sandbox_last_variables(
             setattr(sandbox, "last_dataframe_variable", target_variable)
         except Exception:
             pass
+
+
+def _preview_stdio_result(stdio: str) -> str:
+    """Создает компактный preview для успешного выполнения без target_variable.
+
+    Args:
+        stdio: Объединенный stdout/stderr после выполнения кода.
+
+    Returns:
+        Краткий текст preview или пустая строка.
+    """
+
+    text = str(stdio or "").strip()
+    if not text:
+        return ""
+    return _limit_text(f"type: console_output\n{text}", max_chars=MAX_TEXT_PREVIEW_CHARS)
 
 
 def _preview_value(value: Any) -> str:
@@ -660,7 +776,7 @@ def _combined_stdio(stdout: io.StringIO, stderr: io.StringIO) -> str:
 
 
 def _python_error_possible_causes(exc: Exception) -> list[str]:
-    """Возвращает вероятные причины ошибки python_analysis.
+    """Возвращает вероятные причины ошибки execute_python_code.
 
     Args:
         exc: Исключение валидации, компиляции или выполнения кода.
@@ -686,7 +802,7 @@ def _python_error_possible_causes(exc: Exception) -> list[str]:
 
 
 def _python_error_solution_options(exc: Exception) -> list[str]:
-    """Возвращает варианты исправления ошибки python_analysis.
+    """Возвращает варианты исправления ошибки execute_python_code.
 
     Args:
         exc: Исключение валидации, компиляции или выполнения кода.
@@ -697,8 +813,9 @@ def _python_error_solution_options(exc: Exception) -> list[str]:
 
     options = [
         "Проверь available_variables и используй только существующие имена переменных.",
-        "Исправь generated_code с учетом traceback и повтори python_analysis.",
-        "Сохрани результат в target_variable, указанный в вызове инструмента.",
+        "Исправь generated_code с учетом traceback и повтори execute_python_code.",
+        "Если нужна именованная переменная, сохрани результат в target_variable.",
+        "Если достаточно print-вывода, повтори вызов без target_variable и читай execution_output.",
     ]
     if isinstance(exc, SyntaxError):
         options.insert(0, "Исправь синтаксис Python-кода перед повторным запуском.")
@@ -712,7 +829,7 @@ def _python_error_solution_options(exc: Exception) -> list[str]:
 
 
 def _python_retry_guidance() -> str:
-    """Возвращает краткую инструкцию по retry для python_analysis.
+    """Возвращает краткую инструкцию по retry для execute_python_code.
 
     Returns:
         Текст, объясняющий как повторять вызов после ошибки.
@@ -721,7 +838,7 @@ def _python_retry_guidance() -> str:
     return (
         "Не повторяй тот же код без изменений. Используй generated_code, error, "
         "traceback и available_variables из этого ответа, исправь причину и "
-        "повтори python_analysis."
+        "повтори execute_python_code."
     )
 
 

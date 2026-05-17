@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-import json
 from asyncio import run
 from pathlib import Path
 
 import pandas as pd
 from langchain_core.tools import tool
 
+from examples.fake_spark_tools import build_fake_spark_tools
 from planner_agent.models import Task
 from planner_agent.services.artifact_service import ArtifactService
 from planner_agent.tools.artifact_wrappers import wrap_tools_for_artifacts
+from planner_agent.runtime.tool_text import is_tool_error_result
 
 
 class FakeSandbox:
@@ -86,14 +87,19 @@ class ToolArtifactTests(unittest.TestCase):
             result = run(wrapped_tool.ainvoke({"client_id": "client-1"}))
 
             self.assertIsInstance(result, str)
-            self.assertIn("data_scope: dataframe_metadata_only", result)
-            self.assertIn("row_count: 2", result)
-            self.assertIn("columns:", result)
-            self.assertIn("column_types:", result)
-            self.assertIn("has_empty_values: true", result)
-            self.assertIn("variable_name: tdf_load_load_client_events_1", result)
-            self.assertIn("preview_row:", result)
+            self.assertIn("<tool_result>", result)
+            self.assertIn("<status>success</status>", result)
+            self.assertIn("<dataframe_preview>", result)
+            self.assertIn("<data_description>", result)
+            self.assertIn("<row_count>2</row_count>", result)
+            self.assertIn("<columns>", result)
+            self.assertIn("<column_types>", result)
+            self.assertIn("<has_empty_values>true</has_empty_values>", result)
+            self.assertIn("<preview_row>", result)
             self.assertIn("evt-secret-1", result)
+            self.assertNotIn("<artifact>", result)
+            self.assertNotIn("<sandbox>", result)
+            self.assertNotIn("sandbox_variable_name", result)
             self.assertIn("tdf_load_load_client_events_1", sandbox.globals)
             self.assertIs(sandbox.globals["tdf_load_load_client_events_1"], sandbox.globals[sandbox.last_dataframe_variable])
 
@@ -134,6 +140,80 @@ class ToolArtifactTests(unittest.TestCase):
             captured_content = Path(captured_artifact.uri).read_text(encoding="utf-8")
             self.assertIn("evt-secret-1", captured_content)
 
+    def test_spark_dataframe_result_uses_minimal_xml_contract(self) -> None:
+        """Проверяет, что Spark DataFrame возвращает модели только статус, preview и описание."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifacts = ArtifactService(tmp)
+            task = Task(task_id="spark-load", description="Load Spark data")
+            artifact_index: dict = {}
+            tool_traces: list[dict] = []
+            sandbox = FakeSandbox()
+            spark_tool = build_fake_spark_tools(delay_seconds=0.0)[0]
+
+            wrapped_tool = wrap_tools_for_artifacts(
+                tools=[spark_tool],
+                artifact_service=artifacts,
+                run_id="run-spark",
+                node_id="node-spark",
+                task=task,
+                artifact_index=artifact_index,
+                tool_traces=tool_traces,
+                sandbox=sandbox,
+            )[0]
+
+            result = run(
+                wrapped_tool.ainvoke(
+                    {
+                        "table_name": "hits",
+                        "select_columns": "event_id, epk_id",
+                        "max_rows": 1,
+                    }
+                )
+            )
+
+            self.assertIn("<status>success</status>", result)
+            self.assertIn("<dataframe_preview>", result)
+            self.assertIn("<data_description>", result)
+            self.assertIn("<row_count>1</row_count>", result)
+            self.assertNotIn("<source>", result)
+            self.assertNotIn("<query>", result)
+            self.assertNotIn("<artifact>", result)
+            self.assertNotIn("<sandbox>", result)
+
+    def test_spark_error_is_returned_as_plain_text(self) -> None:
+        """Проверяет, что ошибка Spark-like инструмента возвращается текстом без JSON-обертки."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifacts = ArtifactService(tmp)
+            task = Task(task_id="spark-error", description="Load Spark schema")
+            artifact_index: dict = {}
+            tool_traces: list[dict] = []
+            spark_tool = build_fake_spark_tools(delay_seconds=0.0)[0]
+
+            wrapped_tool = wrap_tools_for_artifacts(
+                tools=[spark_tool],
+                artifact_service=artifacts,
+                run_id="run-spark-error",
+                node_id="node-spark-error",
+                task=task,
+                artifact_index=artifact_index,
+                tool_traces=tool_traces,
+            )[0]
+
+            result = run(
+                wrapped_tool.ainvoke(
+                    {
+                        "table_name": "hits",
+                        "select_columns": "",
+                    }
+                )
+            )
+
+            self.assertTrue(is_tool_error_result(result))
+            self.assertIn("Доступные поля", result)
+            self.assertNotIn('"ok"', result)
+
     def test_tool_result_is_saved_as_reusable_artifact(self) -> None:
         @tool("download_transactions")
         async def download_transactions(depth_days: int, amount: float) -> str:
@@ -162,11 +242,9 @@ class ToolArtifactTests(unittest.TestCase):
                 )
             )
 
-            response = json.loads(result)
-            self.assertTrue(response["ok"])
-            self.assertEqual(response["tool_name"], "download_transactions")
-            self.assertEqual(response["result"], "transactions depth=30 amount=1000.0")
-            self.assertIn("next_steps", response)
+            self.assertIn("Инструмент download_transactions выполнил запрос.", result)
+            self.assertIn("transactions depth=30 amount=1000.0", result)
+            self.assertNotIn('"ok"', result)
             # Маленький скалярный результат остается inline и не попадает в
             # task.artifact_refs (только большие/файловые артефакты значимы).
             self.assertEqual(task.artifact_refs, [])
@@ -329,11 +407,10 @@ class ToolArtifactTests(unittest.TestCase):
 
             result = run(wrapped_tool.ainvoke({"client_id": "client-2"}))
 
-            response = json.loads(result)
-            self.assertTrue(response["ok"])
-            self.assertEqual(response["tool_name"], "load_day_events")
-            self.assertEqual(response["result"][0]["event_id"], "evt-1")
-            self.assertIn("artifact_refs", response)
+            self.assertIn("Инструмент load_day_events выполнил запрос.", result)
+            self.assertIn("evt-1", result)
+            self.assertIn("Artifact:", result)
+            self.assertNotIn('"ok"', result)
 
             stored = artifacts.list_artifacts("run-small-list")
             dataset_artifact = next(
@@ -386,9 +463,10 @@ class ToolArtifactTests(unittest.TestCase):
 
             result = run(wrapped_tool.ainvoke({"client_id": "client-2"}))
 
-            response = json.loads(result)
-            self.assertTrue(response["ok"])
-            self.assertIn("artifact_refs", response)
+            self.assertIn("Инструмент spark_query выполнил запрос.", result)
+            self.assertIn("Artifact:", result)
+            self.assertIn("evt-1", result)
+            self.assertNotIn('"ok"', result)
 
             stored = artifacts.list_artifacts("run-records-envelope")
             dataset_artifact = next(
@@ -408,7 +486,7 @@ class ToolArtifactTests(unittest.TestCase):
             self.assertIn("100,client-2,evt-1", csv_content)
 
     def test_tool_exception_returns_actionable_error_for_model(self) -> None:
-        """Проверяет, что исключение инструмента возвращается как понятный JSON."""
+        """Проверяет, что исключение инструмента возвращается как понятный текст."""
 
         @tool("load_missing_source")
         async def load_missing_source(source_file: str) -> str:
@@ -432,28 +510,26 @@ class ToolArtifactTests(unittest.TestCase):
             )[0]
 
             raw = run(wrapped_tool.ainvoke({"source_file": "missing.csv"}))
-            response = json.loads(raw)
 
-            self.assertFalse(response["ok"])
-            self.assertEqual(response["tool_name"], "load_missing_source")
-            self.assertIn("Source not found", response["error"]["message"])
-            self.assertIn("solution_options", response)
-            self.assertIn("retry_guidance", response)
-            self.assertIn("tool_trace_artifact_id", response)
+            self.assertTrue(is_tool_error_result(raw))
+            self.assertIn("Source not found", raw)
+            self.assertIn("Как исправить:", raw)
+            self.assertIn("Повтор:", raw)
+            self.assertIn("Trace artifact:", raw)
+            self.assertNotIn('"ok"', raw)
             self.assertEqual(len(tool_traces), 1)
             self.assertTrue(tool_traces[0]["tool_error"])
-            self.assertIn(response["tool_trace_artifact_id"], artifact_index)
+            self.assertIn(tool_traces[0]["artifact_id"], artifact_index)
 
-    def test_artifact_read_chunk_capture_is_not_added_to_task_refs(self) -> None:
-        """artifact_* мета-инструменты не должны загромождать task.artifact_refs."""
+    def test_load_skill_capture_is_not_added_to_task_refs(self) -> None:
+        """load_skill мета-инструмент не должен загромождать task.artifact_refs."""
 
-        @tool("artifact_read_chunk")
-        async def artifact_read_chunk(artifact_id: str, offset: int = 0) -> dict:
-            """Read chunk of existing artifact."""
+        @tool("load_skill")
+        async def load_skill(name: str) -> dict:
+            """Read existing skill content."""
             return {
-                "artifact": {"artifact_id": artifact_id, "kind": "dataset"},
+                "name": name,
                 "content": "X" * 12_000,
-                "offset": offset,
             }
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -463,7 +539,7 @@ class ToolArtifactTests(unittest.TestCase):
             tool_traces: list[dict] = []
 
             wrapped = wrap_tools_for_artifacts(
-                tools=[artifact_read_chunk],
+                tools=[load_skill],
                 artifact_service=artifacts,
                 run_id="run-meta",
                 node_id="node-meta",
@@ -472,15 +548,15 @@ class ToolArtifactTests(unittest.TestCase):
                 tool_traces=tool_traces,
             )[0]
 
-            run(wrapped.ainvoke({"artifact_id": "foo", "offset": 0}))
+            run(wrapped.ainvoke({"name": "foo"}))
 
-            # Мета-инструменты artifact_* читают существующие данные и не должны
+            # Мета-инструменты чтения файлов читают существующие данные и не должны
             # порождать новые ссылки в task.artifact_refs.
             self.assertEqual(task.artifact_refs, [])
             # Однако сами artifact-записи (capture + trace) сохраняются для аудита.
             self.assertEqual(len(artifact_index), 2)
-            self.assertIn("t3_artifact_read_chunk_1", artifact_index)
-            self.assertIn("t3_artifact_read_chunk_1_trace", artifact_index)
+            self.assertIn("t3_load_skill_1", artifact_index)
+            self.assertIn("t3_load_skill_1_trace", artifact_index)
 
     def test_artifact_labels_use_retry_count_suffix(self) -> None:
         """При повторе задачи labels включают суффикс ``_r{n}`` для уникальности."""

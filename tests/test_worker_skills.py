@@ -11,6 +11,7 @@ from planner_agent.agent_nodes.worker_node import (
     _create_worker_started_lineage,
     _create_worker_system_prompt,
     _format_artifact_context,
+    _format_available_skill_index,
     _load_task_skills,
     _select_task_tools,
 )
@@ -81,10 +82,13 @@ class WorkerSkillLoadingTests(unittest.TestCase):
                 [source_tool, *skill_tools],
                 Task(task_id="3", description="Analyze from context"),
             )
-            self.assertEqual([item.name for item in with_skill_tools], ["source_tool"])
+            self.assertEqual(
+                [item.name for item in with_skill_tools],
+                ["source_tool", "list_skills", "load_skill"],
+            )
 
-    def test_worker_includes_python_analysis_without_suggested_tool_match(self) -> None:
-        """Проверяет совместимость старых планов с новым инструментом python_analysis."""
+    def test_worker_includes_execute_python_code_without_suggested_tool_match(self) -> None:
+        """Проверяет совместимость старых планов с новым инструментом execute_python_code."""
 
         class FakeSandbox:
             """Минимальная sandbox для проверки выбора инструмента."""
@@ -116,7 +120,7 @@ class WorkerSkillLoadingTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual([item.name for item in selected], ["python_analysis"])
+        self.assertEqual([item.name for item in selected], ["execute_python_code"])
 
     def test_planner_preserves_suggested_skills_in_task(self) -> None:
         plan = build_full_plan(
@@ -128,7 +132,7 @@ class WorkerSkillLoadingTests(unittest.TestCase):
                         task_id="1",
                         description="Analyze repeated behavior",
                         suggested_skills=["insight-design"],
-                        suggested_tools=["show_current_dataframe"],
+                        suggested_tools=["read_table"],
                         required_artifacts=["worker result"],
                     )
                 ],
@@ -138,7 +142,7 @@ class WorkerSkillLoadingTests(unittest.TestCase):
 
         task = plan["1"]
         self.assertEqual(task.suggested_skills, ["insight-design"])
-        self.assertEqual(task.suggested_tools, ["show_current_dataframe"])
+        self.assertEqual(task.suggested_tools, ["read_table"])
         self.assertEqual(task.required_artifacts, ["worker result"])
 
     def test_worker_loads_full_skill_content_and_adds_it_to_prompt(self) -> None:
@@ -158,7 +162,7 @@ class WorkerSkillLoadingTests(unittest.TestCase):
                 task_id="1",
                 description="Find insight",
                 suggested_skills=["insight-design", "missing-skill"],
-                suggested_tools=["workspace_read_file"],
+                suggested_tools=["read_table"],
                 expected_output="Insight with evidence references.",
                 required_artifacts=["dataset export"],
             )
@@ -204,8 +208,8 @@ class WorkerSkillLoadingTests(unittest.TestCase):
             self.assertIn("<ARTIFACT df_transactions>", prompt)
             self.assertIn("schema: event_id:str, amount:float", prompt)
             self.assertNotIn("C:/workspace/data/transactions.csv", prompt)
-            self.assertNotIn("<available_skill_previews>", prompt)
-            self.assertNotIn("skill_view", prompt)
+            self.assertIn("<available_skill_index>", prompt)
+            self.assertIn("load_skill", prompt)
             self.assertIn("<loaded_skills>", prompt)
             self.assertIn("<skill name=\"insight-design\">", prompt)
             self.assertIn("Separate observed facts", prompt)
@@ -233,8 +237,14 @@ class WorkerSkillLoadingTests(unittest.TestCase):
             )
 
             self.assertEqual(loaded, {})
+            index = _format_available_skill_index(
+                SkillsService(tmp).build_skill_previews()
+            )
+            self.assertIn("<available_skill_index>", index)
+            self.assertIn("case-analysis: Analyze domain cases.", index)
+            self.assertIn("load_skill", index)
 
-    def test_skill_view_uses_frontmatter_name_and_runtime_tool_loads_content(self) -> None:
+    def test_load_skill_uses_frontmatter_name_and_runtime_tool_loads_content(self) -> None:
         """Проверяет загрузку skill по имени из frontmatter через сервис и runtime tool."""
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -261,7 +271,7 @@ class WorkerSkillLoadingTests(unittest.TestCase):
 
             tools = {tool.name: tool for tool in build_skill_read_tools(service)}
             result = json.loads(
-                tools["skill_view"].invoke({"name": "canonical-skill"})
+                tools["load_skill"].invoke({"name": "canonical-skill"})
             )
 
             self.assertTrue(result["success"])

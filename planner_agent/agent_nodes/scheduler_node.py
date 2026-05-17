@@ -1,9 +1,31 @@
 ﻿"""
 Модуль планировщика задач для агента на LangChain.
 
-Содержит логику для управления расписанием выполнения задач в графе зависимостей,
-включая определение готовых к выполнению задач, сбор контекста от зависимостей
-и отправку задач в worker nodes.
+Содержит:
+- _collect_ancestor_data: сбор переменных и результатов задач-предков.
+- _parse_structured_result: извлечение JSON/Python-структуры из текста.
+- _extract_scalar_inputs: сбор скалярных входов из структуры.
+- _build_dependency_context: формирование контекста зависимостей для worker.
+- _collect_ancestor_task_ids: сбор транзитивных зависимостей задачи.
+- _find_tasks_blocked_by_unfinished_dependencies: поиск задач с failed/skipped
+  зависимостями.
+- _find_terminal_failed_tasks: поиск failed-задач в терминальном плане.
+- _build_blocked_plan_feedback: формирование feedback для replanner.
+- _build_terminal_failed_plan_feedback: формирование feedback по failed-задачам
+  без исполнимых downstream-шагов.
+- _count_terminal_failed_replan_attempts: подсчет попыток recovery.
+- _build_validation_recovery_sends: восстановление задач валидации.
+- scheduler_node: планирование запуска worker/validator/replanner/responder.
+- _create_task_scheduled_lineage: запись node расписания задач.
+- _build_artifact_context: подготовка artifact context для worker.
+- _select_task_skill_previews: выбор preview skills текущей задачи.
+- _select_artifact_ids: выбор artifacts для worker.
+- _is_excluded_worker_context_artifact: фильтрация служебных artifacts.
+- _is_dataframe_worker_artifact: проверка dataset artifact.
+- _compact_artifact_payload: сжатие payload artifact.
+- _artifact_file_name: извлечение имени файла artifact.
+- _limit_text: ограничение длины текста.
+- _resolve_worker_parent_ids: выбор parent node ids для worker.
 """
 
 # Стандартные библиотеки
@@ -29,6 +51,14 @@ MSG_NO_EXECUTABLE_TASKS = "No executable tasks remain."
 MSG_BLOCKED_BY_UNFINISHED_DEPENDENCIES = (
     "Execution plan is blocked by unfinished dependencies; redirecting to replanner."
 )
+MSG_TERMINAL_FAILED_PLAN = (
+    "Execution plan contains failed terminal tasks; redirecting to replanner."
+)
+MSG_TERMINAL_FAILED_REPLAN_EXHAUSTED = (
+    "Execution plan still contains failed terminal tasks after recovery attempts."
+)
+TERMINAL_FAILED_FEEDBACK_TYPE = "terminal_failed_plan"
+MAX_TERMINAL_FAILED_REPLAN_ATTEMPTS = 2
 MAX_ARTIFACTS_IN_WORKER_CONTEXT = 12
 MAX_DEPENDENCY_RESULT_CHARS = 200_000
 MAX_DEPENDENCY_ERROR_CHARS = 100_000
@@ -341,6 +371,108 @@ def _build_blocked_plan_feedback(blocked_tasks: list[dict[str, Any]]) -> dict[st
     }
 
 
+def _find_terminal_failed_tasks(plan: dict[str, Task]) -> list[dict[str, Any]]:
+    """Находит failed-задачи в плане, где больше нет исполнимых задач.
+
+    Args:
+        plan: Текущий runtime-план агента.
+
+    Returns:
+        Список словарей с диагностикой по failed-задачам, которые нельзя
+        молча передавать в responder без попытки recovery-перепланирования.
+    """
+
+    failed_tasks: list[dict[str, Any]] = []
+    for task_id, task in plan.items():
+        if task.status != TaskStatus.FAILED:
+            continue
+        failed_tasks.append(
+            {
+                "task_id": task_id,
+                "status": task.status.value,
+                "description": task.description,
+                "error_log": _limit_text(
+                    task.error_log,
+                    max_chars=MAX_DEPENDENCY_ERROR_CHARS,
+                ),
+                "validation_reason": _limit_text(
+                    task.validation_reason,
+                    max_chars=MAX_DEPENDENCY_VALIDATION_CHARS,
+                ),
+            }
+        )
+    return failed_tasks
+
+
+def _build_terminal_failed_plan_feedback(
+    failed_tasks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Формирует feedback для replanner-а по терминальному failed-плану.
+
+    Args:
+        failed_tasks: Список failed-задач с ошибками и описаниями.
+
+    Returns:
+        Словарь feedback_context, который требует создать recovery-задачи
+        вместо перехода к финальному ответу.
+    """
+
+    failed_ids = [
+        str(item.get("task_id"))
+        for item in failed_tasks
+        if item.get("task_id") is not None
+    ]
+    return {
+        "feedback_type": TERMINAL_FAILED_FEEDBACK_TYPE,
+        "summary": MSG_TERMINAL_FAILED_PLAN,
+        "failed_task_ids": failed_ids,
+        "failed_tasks": failed_tasks,
+        "suggested_investigations": [
+            "Создать replacement/recovery-задачи с новыми task_id для failed-шагов.",
+            "Сохранить полезные результаты успешных задач и перестроить downstream-план.",
+        ],
+        "replan_guidance": (
+            "Не завершай run финальным ответом, если failed-задача закрывает "
+            "необходимую часть пользовательского запроса. Создай новую задачу "
+            "с новым task_id и другой стратегией выполнения. Failed-задачи: "
+            f"{', '.join(failed_ids)}."
+        ),
+    }
+
+
+def _count_terminal_failed_replan_attempts(
+    feedback_context: list[dict[str, Any]] | None,
+    failed_task_ids: set[str],
+) -> int:
+    """Считает предыдущие recovery-попытки по терминальному failed-плану.
+
+    Args:
+        feedback_context: Накопленный feedback_context из состояния агента.
+        failed_task_ids: Идентификаторы failed-задач текущего терминального плана.
+
+    Returns:
+        Количество записей feedback с типом ``terminal_failed_plan``, которые
+        относятся к тем же failed-задачам.
+    """
+
+    attempts = 0
+    for item in feedback_context or []:
+        if (
+            not isinstance(item, dict)
+            or item.get("feedback_type") != TERMINAL_FAILED_FEEDBACK_TYPE
+        ):
+            continue
+        previous_ids = {
+            str(task_id)
+            for task_id in item.get("failed_task_ids") or []
+            if task_id is not None
+        }
+        if previous_ids and previous_ids.isdisjoint(failed_task_ids):
+            continue
+        attempts += 1
+    return attempts
+
+
 def _build_validation_recovery_sends(
     *,
     state: AgentState,
@@ -404,8 +536,38 @@ async def scheduler_node(
             update={"messages": [AIMessage(content=MSG_EMPTY_PLAN)]},
         )
 
-    # Проверка завершения всех задач
+    terminal_failed_tasks = _find_terminal_failed_tasks(plan)
+
+    # Проверка завершения всех задач. Failed-задачи сначала отправляются в
+    # replanner, иначе run преждевременно уйдет в responder без recovery-плана.
     if all(task.status in TERMINAL_STATUSES for task in plan.values()):
+        if terminal_failed_tasks:
+            terminal_failed_task_ids = {
+                str(item.get("task_id"))
+                for item in terminal_failed_tasks
+                if item.get("task_id") is not None
+            }
+            attempts = _count_terminal_failed_replan_attempts(
+                state.feedback_context,
+                terminal_failed_task_ids,
+            )
+            if attempts < MAX_TERMINAL_FAILED_REPLAN_ATTEMPTS:
+                feedback = _build_terminal_failed_plan_feedback(terminal_failed_tasks)
+                return Command(
+                    goto=GOTO_REPLANNER,
+                    update={
+                        "messages": [AIMessage(content=MSG_TERMINAL_FAILED_PLAN)],
+                        "feedback_context": [feedback],
+                    },
+                )
+            return Command(
+                goto="responder",
+                update={
+                    "messages": [
+                        AIMessage(content=MSG_TERMINAL_FAILED_REPLAN_EXHAUSTED)
+                    ],
+                },
+            )
         return Command(goto="responder")
 
     worker_payloads: list[WorkerPayload] = []
@@ -461,7 +623,7 @@ async def scheduler_node(
             resolved_inputs=dependency_context.get("resolved_inputs", {}),
             dependency_context=dependency_context,
             filesystem_context=state.filesystem_context,
-            skill_previews={},
+            skill_previews=_select_task_skill_previews(state.skill_previews, task),
             artifact_context=_build_artifact_context(state, task),
             initial_user_query=state.initial_user_query,
         )
@@ -612,19 +774,19 @@ def _select_task_skill_previews(
     skill_previews: dict[str, str],
     task: Task,
 ) -> dict[str, str]:
-    """Выбирает preview skills, явно назначенных текущей задаче.
+    """Готовит индекс preview skills для worker payload.
 
     Args:
         skill_previews: Полный индекс кратких описаний skills из состояния агента.
         task: Задача, для которой формируется payload worker-а.
 
     Returns:
-        Словарь ``{skill_name: preview}`` только для skills из
-        ``task.suggested_skills``. Если задача не содержит явных skills,
-        возвращается пустой словарь.
+        Словарь ``{skill_name: preview}`` со всеми доступными skills.
+        Skills из ``task.suggested_skills`` сохраняются первыми, чтобы worker
+        видел подсказку planner-а, но мог сам загрузить другой релевантный skill.
     """
 
-    if not skill_previews or not task.suggested_skills:
+    if not skill_previews:
         return {}
 
     selected: dict[str, str] = {}
@@ -632,6 +794,10 @@ def _select_task_skill_previews(
         key = str(skill_name).strip()
         if key and key in skill_previews:
             selected[key] = skill_previews[key]
+    for skill_name, preview in skill_previews.items():
+        key = str(skill_name).strip()
+        if key and key not in selected:
+            selected[key] = preview
     return selected
 
 

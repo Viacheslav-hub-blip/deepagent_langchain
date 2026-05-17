@@ -48,7 +48,7 @@ scheduler -> worker -> critic <-> worker (до 1 ретрая critic) -> validat
   -> (skill selection -> FullPlan -> plan_review) -> scheduler -> … -> responder
 ```
 
-`responder_node` работает как ReAct-агент: получает стартовый контекст (запрос, full_result/result_preview/error_log по задачам, id и метаданные artifacts), при необходимости читает данные через runtime `artifact_*` tools и завершает отчет через `submit_final_report`.
+`responder_node` работает как ReAct-агент: получает стартовый контекст (запрос, full_result/result_preview/error_log по задачам, id и метаданные artifacts), при необходимости читает данные через runtime tools `list_files` / `read_file` и завершает отчет через `submit_final_report`.
 
 ## Песочница, разрешённые библиотеки и подсказка worker-у по pip-пакетам
 
@@ -203,7 +203,7 @@ Reviewer помечает план как проблемный, если:
 - skill previews;
 - full skills, если они указаны в `task.suggested_skills`;
 - runtime tools `skill_list` и `skill_view`;
-- runtime artifact tools;
+- runtime file tools для artifacts;
 - domain/source tools.
 
 Worker может:
@@ -342,7 +342,7 @@ Responder формирует:
 
 У responder доступны инструменты:
 - `submit_final_report` (обязательный финальный вызов с markdown-отчетом);
-- runtime `artifact_*` tools (`artifact_list`, `artifact_preview`, `artifact_read_chunk`, `artifact_profile`, `artifact_sample`, `artifact_search`, `artifact_value_counts`) для чтения артефактов по требованию.
+- runtime tools `list_files` / `read_file` для списка и чтения файлов artifacts по требованию.
 
 Итоговый markdown берётся из `submit_final_report`; fallback допускается из финального AI-сообщения, если tool не был вызван. Параллельно сохраняется `final_report_context.md` с тем, что именно видел responder на старте.
 
@@ -363,9 +363,9 @@ Responder формирует:
 - Кеширование `loaded_skills`: повторная загрузка одного и того же skill через `skill_view()` не выполняется.
 - Worker получает previews skills, автоматически загружает skills из `suggested_skills` и может сам вызвать runtime tools `skill_list` / `skill_view`.
 - Artifact store для больших outputs, tool results, worker outputs, Python code traces и responder context.
-- Runtime artifact tools: preview, read chunk, profile, sample, search, value counts.
+- Runtime file tools для artifacts: `list_files`, `read_file`.
 - Runtime skill tools: `skill_list`, `skill_view`.
-- Responder execution через ReAct agent с `submit_final_report` и artifact tools.
+- Responder execution через ReAct agent с `submit_final_report` и file tools.
 - Read API на `ResearchAgent` и опциональный REST-слой `planner_agent.http_api` (FastAPI).
 - Branch/dialog context поверх существующих runs.
 - Нативный tool `python_analysis` для Python-расчетов в sandbox.
@@ -809,7 +809,7 @@ AnaliticAgenticPlatform/
 
 - получает `WorkerPayload`;
 - выбирает только нужные domain/source tools;
-- добавляет runtime artifact tools;
+- добавляет runtime file tools для artifacts;
 - получает preview доступных skills;
 - автоматически загружает full skill content по `task.suggested_skills`;
 - может вручную вызвать runtime tools `skill_list` и `skill_view`;
@@ -855,7 +855,7 @@ AnaliticAgenticPlatform/
 - получает исходный запрос;
 - собирает по всем задачам сводку с приоритетом `full_result` и id артефактов;
 - передает в responder каталог artifacts (id и метаданные);
-- запускает ReAct responder с tools `submit_final_report` + runtime `artifact_*`;
+- запускает ReAct responder с tools `submit_final_report` + runtime `list_files` / `read_file`;
 - позволяет дочитать артефакты через tools только при необходимости;
 - сохраняет `final_report.md`;
 - сохраняет `final_report_context.md`, чтобы можно было увидеть, что именно видел responder.
@@ -872,15 +872,10 @@ AnaliticAgenticPlatform/
 
 `tools/artifact_read_tools.py`
 
-Добавляет runtime tools для чтения artifacts:
+Добавляет runtime tools для списка и чтения файлов artifacts:
 
-- `artifact_list`;
-- `artifact_preview`;
-- `artifact_read_chunk`;
-- `artifact_profile`;
-- `artifact_sample`;
-- `artifact_search`;
-- `artifact_value_counts`.
+- `list_files`;
+- `read_file`.
 
 `tools/artifact_wrappers.py`
 
@@ -1182,7 +1177,7 @@ dependency_ids: ['2', '1']
 [artifact_usage_rules]
 - Treat listed artifacts as already available evidence or working files.
 - Prefer reusing relevant reusable artifacts before calling tools again.
-- Use artifact_profile or artifact_value_counts for counts and distributions.
+- Use list_files to discover available files and read_file to inspect file content when a claim depends on it.
 ...
 - artifact_id: artifact-transactions; kind: dataset; uri: C:/.../transactions.json; ...
 </artifact_context>
@@ -1309,7 +1304,7 @@ Full worker output:
 </worker_task_outputs>
 
 <artifact_catalog>
-Artifacts linked from plan tasks (names and metadata only; file contents are not included — use artifact_* tools when needed).
+Artifacts linked from plan tasks (names and metadata only; file contents are not included — use list_files/read_file tools when needed).
 - artifact_id=artifact-transactions | kind=dataset | summary=Client transactions | file=transactions.json | mime_type=application/json
 - artifact_id=artifact-analysis | kind=model_output | summary=Pattern analysis | file=result.md | mime_type=text/markdown
 </artifact_catalog>
@@ -1322,7 +1317,7 @@ No planning error
 Далее responder работает как ReAct-агент:
 
 - анализирует выводы workers из `<worker_task_outputs>`;
-- при необходимости читает артефакты через `artifact_*` tools;
+- при необходимости читает артефакты через `list_files` / `read_file`;
 - завершает работу вызовом `submit_final_report` с финальным markdown.
 
 Responder сохраняет стартовый входной пакет в:
@@ -1475,7 +1470,7 @@ async def spark_get_trigger_case_by_event_id(event_id: str) -> dict:
 - workspace tools `load_dataframe_from_workspace` и `load_additional_source` возвращают DataFrame, чтобы wrapper сохранил его как dataset artifact и передал модели только структуру;
 - preview sandbox-переменных больше не включает первую строку DataFrame, чтобы не протаскивать данные в prompt без необходимости.
 
-`task.artifact_refs` теперь содержит только значимые входы для дальнейшего анализа: большие captured results и ссылки на существующие файлы. Служебные `tool_trace`, вызовы `artifact_*` / `skill_*`, code trace и маленькие inline structured results остаются в общем `artifact_index`, но не засоряют контекст задач.
+`task.artifact_refs` теперь содержит только значимые входы для дальнейшего анализа: большие captured results и ссылки на существующие файлы. Служебные `tool_trace`, вызовы `list_files` / `read_file` / `skill_*`, code trace и маленькие inline structured results остаются в общем `artifact_index`, но не засоряют контекст задач.
 
 Вызовы tools сохраняются отдельно:
 
@@ -1634,7 +1629,7 @@ python -m unittest discover -s tests
 - `test_worker_lineage.py` - worker lineage.
 - `test_responder_lineage.py` - responder context и final report artifacts.
 - `test_tool_artifacts.py` - artifact capture больших tool results, DataFrame metadata, sandbox variable references и tool trace.
-- `test_artifact_read_tools.py` - runtime artifact tools.
+- `test_artifact_read_tools.py` - runtime file tools для artifacts.
 - `test_branch_*` - branch и restore.
 - `test_run_inspection_service.py` - read API инспекции run.
 - `test_ui_api.py` - HTTP API, live run и чтение сохраненных runs/artifacts для UI.

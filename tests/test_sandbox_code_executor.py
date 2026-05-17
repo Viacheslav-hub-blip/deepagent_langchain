@@ -9,19 +9,24 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
 import pandas as pd
 from langchain_core.tools import tool
 
 from planner_agent.agent_nodes.worker_node import _apply_tool_output
 from planner_agent.factory import _prepare_worker_tools
+from planner_agent.factory import _filter_worker_tools
 from planner_agent.models import Task
+from planner_agent.tools.artifact_wrappers import _format_python_analysis_tool_response
 from planner_agent.tools.python_analysis_tool import (
     PYTHON_ANALYSIS_TOOL_NAME,
     PythonAnalysisTool,
     build_python_analysis_tool,
 )
+from planner_agent.runtime.tool_text import is_tool_error_result
 
 
 class FakeSandbox:
@@ -142,6 +147,31 @@ class SandboxCodeExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sandbox.last_target_variable, "segment_counts")
         self.assertEqual(sandbox.last_dataframe_variable, "segment_counts")
 
+    async def test_python_analysis_resolves_relative_files_from_sandbox_working_directory(self) -> None:
+        """Проверяет загрузку файла по имени из рабочей директории sandbox."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            source_path = workspace / "sample.csv"
+            source_path.write_text("client_id,amount\n1,100\n2,250\n", encoding="utf-8")
+            sandbox = FakeSandbox()
+            sandbox.working_directory = workspace
+            analysis_tool = build_python_analysis_tool(sandbox)
+            cwd_before = Path.cwd()
+
+            raw_result = await analysis_tool.ainvoke(
+                {
+                    "code": "loaded_df = pd.read_csv('sample.csv')",
+                    "target_variable": "loaded_df",
+                }
+            )
+
+            result = json.loads(raw_result)
+            self.assertTrue(result["success"])
+            self.assertEqual(Path.cwd(), cwd_before)
+            self.assertIn("loaded_df", sandbox.globals)
+            self.assertEqual(sandbox.globals["loaded_df"]["amount"].sum(), 350)
+
     async def test_python_analysis_returns_compile_error_as_json(self) -> None:
         """Проверяет, что ошибка компиляции возвращается как JSON для retry."""
 
@@ -186,6 +216,49 @@ class SandboxCodeExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("\n\nchannel_value", result["generated_code"])
         self.assertNotIn("\\n\\nchannel_value", result["generated_code"])
 
+    async def test_python_analysis_succeeds_without_target_variable_when_printing(self) -> None:
+        """Проверяет успех при print-выводе без обязательной target_variable."""
+
+        df = pd.DataFrame({"value": [1, 2, 3]})
+        sandbox = FakeSandbox({"source_df": df})
+        analysis_tool = build_python_analysis_tool(sandbox)
+
+        raw_result = await analysis_tool.ainvoke(
+            {
+                "code": (
+                    "print('rows', len(source_df))\n"
+                    "derived_df = source_df.assign(doubled=source_df['value'] * 2)"
+                ),
+            }
+        )
+
+        result = json.loads(raw_result)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["target_variable"], "")
+        self.assertIn("rows 3", result["execution_output"])
+        self.assertIn("rows 3", result["variable_preview"])
+        self.assertIn("derived_df", sandbox.globals)
+
+    async def test_python_analysis_still_requires_target_variable_when_specified(self) -> None:
+        """Проверяет ошибку, если указанная target_variable не создана."""
+
+        sandbox = FakeSandbox()
+        analysis_tool = build_python_analysis_tool(sandbox)
+
+        raw_result = await analysis_tool.ainvoke(
+            {
+                "code": "print('only stdout')",
+                "target_variable": "analysis_result",
+            }
+        )
+
+        result = json.loads(raw_result)
+
+        self.assertFalse(result["success"])
+        self.assertIn("MissingTargetVariable", result["error"])
+        self.assertIn("only stdout", result["execution_output"])
+
     async def test_python_analysis_returns_runtime_error_as_json(self) -> None:
         """Проверяет, что runtime-ошибка видна модели вместе с traceback."""
 
@@ -208,12 +281,33 @@ class SandboxCodeExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["possible_causes"])
         self.assertTrue(result["solution_options"])
 
+    async def test_python_analysis_response_highlights_execution_output_for_agent(self) -> None:
+        """Проверяет человекочитаемый ответ wrapper-а с stdout для worker-а."""
+
+        payload = json.dumps(
+            {
+                "success": True,
+                "message": "Python code executed successfully.",
+                "target_variable": "",
+                "variable_preview": "type: console_output\nstdout:\nrows 3",
+                "execution_output": "stdout:\nrows 3",
+                "available_variables": ["source_df"],
+            },
+            ensure_ascii=False,
+        )
+        formatted = _format_python_analysis_tool_response(tool_input={"code": "print('rows 3')"}, raw_result=payload)
+
+        self.assertIsInstance(formatted, str)
+        self.assertIn("execution_output", formatted)
+        self.assertIn("rows 3", formatted)
+        self.assertFalse(is_tool_error_result(formatted))
+
     async def test_worker_keeps_failed_code_and_error_for_retry(self) -> None:
         """Проверяет сохранение кода и ошибки worker-а после ошибки инструмента."""
 
         task = Task(
             task_id="t1",
-            description="Проверить повтор после ошибки python_analysis.",
+            description="Проверить повтор после ошибки execute_python_code.",
         )
         raw_output = json.dumps(
             {
@@ -272,6 +366,18 @@ class SandboxCodeExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(prepared_tools), 1)
         self.assertIsInstance(prepared_tools[0], PythonAnalysisTool)
         self.assertEqual(prepared_tools[0].name, PYTHON_ANALYSIS_TOOL_NAME)
+
+    async def test_factory_keeps_only_public_worker_tools(self) -> None:
+        """Проверяет, что worker получает только публичный набор инструментов."""
+
+        prepared_tools = _filter_worker_tools(
+            [
+                build_python_analysis_tool(FakeSandbox()),
+                fake_generate_python_code,
+            ]
+        )
+
+        self.assertEqual([tool.name for tool in prepared_tools], ["execute_python_code"])
 
 
 if __name__ == "__main__":

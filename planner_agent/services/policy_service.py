@@ -44,14 +44,10 @@ DEFAULT_DENIED_TOOLS = {
 }
 
 DEFAULT_ALLOWED_TOOLS = {
-    "python_analysis",
-    "list_loaded_dataframes_in_virtual_environment",
-    "show_current_dataframe",
-    "workspace_read_file",
-    "workspace_write_file",
-    "save_simple_variable_in_virtual_env_to_file",
-    "load_additional_context",
-    "load_additional_source_database_table",
+    "execute_python_code",
+    "read_table",
+    "list_skills",
+    "load_skill",
 }
 
 WRITE_PATH_KEYS = ("path", "file_path", "output_path", "filename")

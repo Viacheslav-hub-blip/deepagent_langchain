@@ -63,18 +63,7 @@ class ResponderLineageTests(unittest.TestCase):
             )
             llm = BindableFakeMessagesListChatModel(
                 responses=[
-                    AIMessage(
-                        content="",
-                        tool_calls=[
-                            {
-                                "name": "submit_final_report",
-                                "args": {"report": "The data looks consistent."},
-                                "id": "submit-1",
-                                "type": "tool_call",
-                            }
-                        ],
-                    ),
-                    AIMessage(content="Done."),
+                    AIMessage(content="# Analysis Report\n\nThe data looks consistent."),
                 ]
             )
 

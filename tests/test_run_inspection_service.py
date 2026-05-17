@@ -194,8 +194,8 @@ class RunInspectionServiceTests(unittest.TestCase):
                 run_id=run_record.run_id,
                 node_id=child_node.node_id,
                 kind="tool_trace",
-                filename="tasks/1/tool_calls/read_file.txt",
-                content="read_file(path='demo.json')",
+                filename="tasks/1/tool_calls/legacy_tool.txt",
+                content="legacy_tool(path='demo.json')",
                 mime_type="text/plain",
                 summary="Tool trace",
             )

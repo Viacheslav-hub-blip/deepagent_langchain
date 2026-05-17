@@ -100,7 +100,7 @@ def build_fake_model() -> ToolBindableFakeMessagesListChatModel:
                   "description": "Inspect df_current and summarize anti-fraud hit patterns.",
                   "dependencies": [],
                   "expected_output": "Short insight summary",
-                  "suggested_tools": ["show_current_dataframe"],
+                  "suggested_tools": ["read_table"],
                   "suggested_skills": ["insight-design"],
                   "required_artifacts": ["worker result"]
                 }

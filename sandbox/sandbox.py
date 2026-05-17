@@ -7,17 +7,22 @@
 - Асинхронное выполнение без блокировки event loop
 - Предпросмотр созданных переменных
 - Информацию об установленных пакетах (get_installed_packages)
+- Рабочую директорию для относительных файловых путей при выполнении кода
 
 """
 
 import ast
 import asyncio
+import builtins
 import contextlib
 import io
+import os
+import threading
 import time
 import traceback
 from dataclasses import dataclass, field
 from importlib.metadata import distributions as _iter_distributions
+from pathlib import Path
 from typing import Any, Dict, Optional, Set, Tuple
 
 # Максимальная длина текстового превью переменной (символов)
@@ -40,6 +45,9 @@ _MODULE_TYPE_NAME: str = "module"
 
 # Количество первых строк DataFrame, используемых для превью
 _DATAFRAME_HEAD_ROWS: int = 1
+
+# Имя общего process-wide lock, защищающего cwd от гонок между sandbox-запусками.
+_CWD_EXECUTION_LOCK_ATTR: str = "_analitic_agent_sandbox_cwd_lock"
 
 
 @dataclass
@@ -117,6 +125,24 @@ class CodeValidator:
         return True, ""
 
 
+def _get_cwd_execution_lock() -> threading.RLock:
+    """Возвращает общий process-wide lock для временной смены cwd.
+
+    Args:
+        Отсутствуют. Lock хранится в ``builtins``, чтобы разные реализации
+        sandbox использовали одну и ту же блокировку.
+
+    Returns:
+        ``threading.RLock`` для защиты ``os.chdir`` и выполнения кода.
+    """
+
+    lock = getattr(builtins, _CWD_EXECUTION_LOCK_ATTR, None)
+    if lock is None:
+        lock = threading.RLock()
+        setattr(builtins, _CWD_EXECUTION_LOCK_ATTR, lock)
+    return lock
+
+
 class ClientPythonSandbox:
     """
     Песочница выполнения кода в памяти с персистентными глобальными переменными.
@@ -133,6 +159,7 @@ class ClientPythonSandbox:
             self,
             allowed_libraries: Optional[Set[str] | Dict[str, Any]] = None,
             initial_globals: Optional[Dict[str, Any]] = None,
+            working_directory: str | Path | None = None,
     ) -> None:
         """
         Инициализирует песочницу.
@@ -142,6 +169,8 @@ class ClientPythonSandbox:
                                По умолчанию — пустое множество.
             initial_globals:   Начальные глобальные переменные среды выполнения.
                                По умолчанию — пустой словарь.
+            working_directory: Рабочая директория для относительных файловых
+                               путей внутри исполняемого кода.
         """
         if initial_globals is None:
             initial_globals = {}
@@ -167,6 +196,42 @@ class ClientPythonSandbox:
 
         self.last_target_variable: Optional[str] = None
         self.last_dataframe_variable: Optional[str] = None
+        self.working_directory: Optional[Path] = self._normalize_working_directory(
+            working_directory
+        )
+
+    def set_working_directory(self, working_directory: str | Path | None) -> None:
+        """Задает рабочую директорию для относительных файловых путей в коде.
+
+        Args:
+            working_directory: Путь к директории. Относительный путь резолвится
+                относительно текущей директории процесса в момент настройки.
+
+        Returns:
+            ``None``. Значение сохраняется в ``self.working_directory``.
+        """
+
+        self.working_directory = self._normalize_working_directory(working_directory)
+
+    @staticmethod
+    def _normalize_working_directory(
+            working_directory: str | Path | None,
+    ) -> Optional[Path]:
+        """Нормализует рабочую директорию sandbox.
+
+        Args:
+            working_directory: Исходный путь или ``None``.
+
+        Returns:
+            Абсолютный путь или ``None``, если директория не задана.
+        """
+
+        if working_directory is None:
+            return None
+        directory_text = str(working_directory).strip()
+        if not directory_text:
+            return None
+        return Path(directory_text).expanduser().resolve()
 
     async def execute(
             self,
@@ -281,10 +346,38 @@ class ClientPythonSandbox:
             stderr_capture: Буфер для перехвата stderr.
         """
         with (
+            self._temporary_working_directory(),
             contextlib.redirect_stdout(stdout_capture),
             contextlib.redirect_stderr(stderr_capture),
         ):
             exec(code, self.globals, self.globals)  # noqa: S102
+
+    @contextlib.contextmanager
+    def _temporary_working_directory(self):
+        """Временно переключает cwd процесса на рабочую директорию sandbox.
+
+        Args:
+            Отсутствуют. Использует ``self.working_directory``.
+
+        Yields:
+            ``None``. После выхода исходная директория восстанавливается.
+        """
+
+        with _get_cwd_execution_lock():
+            if self.working_directory is None:
+                yield
+                return
+            if not self.working_directory.exists() or not self.working_directory.is_dir():
+                raise FileNotFoundError(
+                    f"Рабочая директория sandbox не найдена: {self.working_directory}"
+                )
+
+            previous_directory = Path.cwd()
+            os.chdir(self.working_directory)
+            try:
+                yield
+            finally:
+                os.chdir(previous_directory)
 
     def _get_variable_preview(self, var_name: str) -> str:
         """

@@ -2,9 +2,8 @@
 name: insight-design
 description: Build compact, evidence-aware behavioral insights from event tables.
 tools:
-  - show_current_dataframe
-  - workspace_read_file
-  - load_additional_source_database_table
+  - execute_python_code
+  - read_table
 triggers:
   - client behavior
   - repeated events

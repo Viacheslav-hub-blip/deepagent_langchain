@@ -11,7 +11,11 @@
  * - fetchRunGraph: загружает граф выбранного run.
  * - fetchRunResult: загружает итоговый отчет run.
  * - fetchRunArtifacts: загружает artifacts run.
+ * - fetchNodeInspector: загружает inspector выбранного lineage node.
  * - fetchSkills: загружает доступные skills.
+ * - fetchSkill: загружает полное содержимое выбранного skill.
+ * - fetchArtifactText: загружает полный текстовый artifact.
+ * - fetchArtifactBlob: загружает файл artifact как Blob для preview.
  * - artifactFileUrl: формирует ссылку скачивания artifact.
  */
 
@@ -137,12 +141,77 @@ export function fetchRunArtifacts(runId) {
 }
 
 /**
+ * Загружает inspector выбранного lineage node.
+ *
+ * @param {string} runId Идентификатор run.
+ * @param {string} nodeId Идентификатор lineage node.
+ * @returns {Promise<object>} NodeInspectorView payload.
+ */
+export function fetchNodeInspector(runId, nodeId) {
+  return apiFetch(
+    `/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/inspector?preview_chars=4000&snapshot_preview_chars=1200`
+  );
+}
+
+/**
  * Загружает список skills, доступных агенту.
  *
  * @returns {Promise<object>} Ответ SkillListView.
  */
 export function fetchSkills() {
   return apiFetch("/skills");
+}
+
+/**
+ * Загружает полное содержимое выбранного skill.
+ *
+ * @param {string} skillName Имя skill из списка skills.
+ * @returns {Promise<object>} SkillViewResponse с текстом SKILL.md.
+ */
+export function fetchSkill(skillName) {
+  return apiFetch(`/skills/${encodeURIComponent(skillName)}`);
+}
+
+/**
+ * Загружает полный текст artifact, если backend может прочитать его как UTF-8.
+ *
+ * @param {string} runId Идентификатор run.
+ * @param {string} artifactId Идентификатор artifact.
+ * @returns {Promise<object>} ArtifactTextResponse.
+ */
+export function fetchArtifactText(runId, artifactId) {
+  return apiFetch(
+    `/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}/text`
+  );
+}
+
+/**
+ * Загружает файл artifact как Blob и создает object URL для media preview.
+ *
+ * @param {string} runId Идентификатор run.
+ * @param {string} artifactId Идентификатор artifact.
+ * @returns {Promise<object>} Blob, MIME-тип и object URL для просмотра.
+ * @throws {Error} Ошибка HTTP или текст ошибки backend.
+ */
+export async function fetchArtifactBlob(runId, artifactId) {
+  const base = getApiBase().replace(/\/$/, "");
+  const response = await fetch(
+    `${base}/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}/file`
+  );
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(detail || `HTTP ${response.status}`);
+  }
+
+  const blob = await response.blob();
+  const mimeType = response.headers.get("content-type") || blob.type || "application/octet-stream";
+
+  return {
+    blob,
+    mimeType,
+    objectUrl: URL.createObjectURL(blob),
+  };
 }
 
 /**

@@ -16,7 +16,7 @@ from planner_agent.services.lineage_service import LineageService
 
 
 class SchedulerLineageTests(unittest.TestCase):
-    def test_scheduler_selects_only_task_skill_previews(self) -> None:
+    def test_scheduler_passes_full_skill_index_to_worker(self) -> None:
         """Проверяет, что worker payload получает только явно назначенные skill previews."""
 
         task = Task(
@@ -33,13 +33,19 @@ class SchedulerLineageTests(unittest.TestCase):
             task,
         )
 
-        self.assertEqual(selected, {"case-analysis": "Analyze cases."})
+        self.assertEqual(
+            selected,
+            {
+                "case-analysis": "Analyze cases.",
+                "chart-design": "Build charts.",
+            },
+        )
         self.assertEqual(
             _select_task_skill_previews(
                 {"case-analysis": "Analyze cases."},
                 Task(task_id="2", description="No skill"),
             ),
-            {},
+            {"case-analysis": "Analyze cases."},
         )
 
     def test_scheduler_creates_task_scheduled_node_for_ready_batch(self) -> None:
@@ -271,7 +277,7 @@ class SchedulerLineageTests(unittest.TestCase):
             ["artifact-transactions", "artifact-trigger"],
         )
 
-    def test_scheduler_does_not_pass_skill_previews_to_worker_payload(self) -> None:
+    def test_scheduler_passes_skill_previews_to_worker_payload(self) -> None:
         """Проверяет передачу preview skills из state в WorkerPayload."""
 
         state = AgentState(
@@ -291,7 +297,10 @@ class SchedulerLineageTests(unittest.TestCase):
 
         self.assertEqual(len(sends), 1)
         payload = sends[0].arg
-        self.assertEqual(payload.skill_previews, {})
+        self.assertEqual(
+            payload.skill_previews,
+            {"case-analysis": "Domain analysis skill preview."},
+        )
 
     def test_scheduler_redirects_blocked_plan_to_replanner(self) -> None:
         """Проверяет переход к replanner при блокировке failed-зависимостью."""
@@ -323,6 +332,74 @@ class SchedulerLineageTests(unittest.TestCase):
             feedback["failed_task_diagnosis"][0]["blocked_by"],
             [{"task_id": "1", "status": "failed"}],
         )
+
+    def test_scheduler_redirects_terminal_failed_plan_to_replanner(self) -> None:
+        """Проверяет, что terminal failed-план не уходит сразу в responder."""
+
+        state = AgentState(
+            plan={
+                "1": Task(
+                    task_id="1",
+                    description="Retrieve antifraud hit details",
+                    status=TaskStatus.FAILED,
+                    error_log="Critic retry still did not satisfy task scope.",
+                ),
+            },
+        )
+
+        command = run(scheduler_node(state))
+
+        self.assertEqual(command.goto, "replanner")
+        self.assertEqual(len(command.update["feedback_context"]), 1)
+        feedback = command.update["feedback_context"][0]
+        self.assertEqual(feedback["feedback_type"], "terminal_failed_plan")
+        self.assertEqual(feedback["failed_task_ids"], ["1"])
+        self.assertEqual(feedback["failed_tasks"][0]["task_id"], "1")
+
+    def test_scheduler_allows_responder_after_terminal_failed_replan_limit(self) -> None:
+        """Проверяет предохранитель от бесконечного recovery-перепланирования."""
+
+        state = AgentState(
+            plan={
+                "1": Task(
+                    task_id="1",
+                    description="Retrieve antifraud hit details",
+                    status=TaskStatus.FAILED,
+                    error_log="Still failed.",
+                ),
+            },
+            feedback_context=[
+                {"feedback_type": "terminal_failed_plan", "failed_task_ids": ["1"]},
+                {"feedback_type": "terminal_failed_plan", "failed_task_ids": ["1"]},
+            ],
+        )
+
+        command = run(scheduler_node(state))
+
+        self.assertEqual(command.goto, "responder")
+        self.assertIn("messages", command.update)
+
+    def test_scheduler_ignores_terminal_failed_replan_limit_for_other_task(self) -> None:
+        """Проверяет, что recovery-лимит считается по конкретным failed task ids."""
+
+        state = AgentState(
+            plan={
+                "2": Task(
+                    task_id="2",
+                    description="Load all transaction records",
+                    status=TaskStatus.FAILED,
+                    error_log="Different task failed.",
+                ),
+            },
+            feedback_context=[
+                {"feedback_type": "terminal_failed_plan", "failed_task_ids": ["1"]},
+                {"feedback_type": "terminal_failed_plan", "failed_task_ids": ["1"]},
+            ],
+        )
+
+        command = run(scheduler_node(state))
+
+        self.assertEqual(command.goto, "replanner")
 
     def test_collect_ancestor_data_uses_full_result_when_available(self) -> None:
         """Проверяет, что в контекст предков попадает полный результат задачи."""

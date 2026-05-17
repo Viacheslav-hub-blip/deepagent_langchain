@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,12 @@ from planner_agent.http_api.config import ApiServices
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 EXAMPLE_ROOT = PROJECT_ROOT / "examples"
+
+
+def _suppress_uvicorn_access_log() -> None:
+    """Отключает построчный access-log uvicorn (GET /api/... 200 OK)."""
+
+    logging.getLogger("uvicorn.access").disabled = True
 
 
 def _build_sandbox() -> ClientPythonSandbox:
@@ -68,7 +75,7 @@ async def _build_agent() -> ResearchAgent:
     )
 
     return ResearchAgent(
-        model=deepseek_model,
+        model=gigachat,
         sandbox=sandbox,
         tools=spark_tools,
         code_generator_tool_names=set(),
@@ -135,6 +142,7 @@ def create_app_with_agent():
         запускать агента через API endpoints.
     """
 
+    _suppress_uvicorn_access_log()
     agent = _run_async_before_server_start(_build_agent())
     services = ApiServices(
         lineage_service=agent.lineage_service,
@@ -151,4 +159,17 @@ def create_app_with_agent():
             api_prefix="/api/v1",
         ),
         services=services,
+    )
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    _suppress_uvicorn_access_log()
+    uvicorn.run(
+        "main_ui_agent_server:create_app_with_agent",
+        factory=True,
+        host="127.0.0.1",
+        port=8000,
+        access_log=False,
     )

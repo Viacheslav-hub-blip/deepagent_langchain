@@ -3,7 +3,12 @@
  *
  * Содержит:
  * - buildPayload: формирует payload запуска агента.
+ * - stringifyMessageContent: приводит content сообщения к строке.
+ * - assistantMessageText: извлекает последний ответ ассистента из сообщений.
+ * - finalNodeSummary: извлекает summary финального узла графа.
+ * - reportArtifactSummary: извлекает summary report artifact.
  * - reportTextFromResult: извлекает markdown-отчет из RunResult.
+ * - reportTextFromGraph: извлекает финальный текст из RunGraph.
  * - initialQueryFromRun: извлекает исходный запрос из ResearchRun.
  * - useAnalyticsRun: управляет live запуском, историческим run, графом, отчетом и artifacts.
  */
@@ -35,13 +40,129 @@ function buildPayload(query) {
 }
 
 /**
+ * Приводит content LangChain/UI сообщения к строке для отображения в markdown.
+ *
+ * @param {unknown} content Содержимое сообщения.
+ * @returns {string} Текст сообщения.
+ */
+function stringifyMessageContent(content) {
+  if (typeof content === "string") {
+    return content.trim();
+  }
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (typeof item?.text === "string") return item.text;
+        if (typeof item?.content === "string") return item.content;
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+  }
+  if (content && typeof content === "object") {
+    if (typeof content.text === "string") return content.text.trim();
+    if (typeof content.content === "string") return content.content.trim();
+  }
+  return "";
+}
+
+/**
+ * Извлекает последний текстовый ответ ассистента из массива сообщений.
+ *
+ * @param {Array | undefined} messages Сообщения из API или snapshot.
+ * @returns {string} Последний ответ ассистента.
+ */
+function assistantMessageText(messages) {
+  for (const message of [...(messages || [])].reverse()) {
+    const role = String(message?.role || message?.type || "").toLowerCase();
+    if (!["ai", "assistant"].includes(role)) {
+      continue;
+    }
+    const text = stringifyMessageContent(message?.content);
+    if (text) {
+      return text;
+    }
+  }
+  return "";
+}
+
+/**
+ * Ищет summary последнего финального node в списке nodes.
+ *
+ * @param {Array | undefined} nodes Узлы run graph или RunResult.
+ * @returns {string} Summary финального узла.
+ */
+function finalNodeSummary(nodes) {
+  for (const node of [...(nodes || [])].reverse()) {
+    const signature = `${node?.node_type || ""} ${node?.title || ""}`.toLowerCase();
+    if (!signature.includes("final") && !signature.includes("report") && !signature.includes("answer")) {
+      continue;
+    }
+    const text = String(node?.summary || "").trim();
+    if (text) {
+      return text;
+    }
+  }
+  return "";
+}
+
+/**
+ * Ищет summary последнего report artifact.
+ *
+ * @param {Array | undefined} artifacts Artifacts из RunResult.
+ * @returns {string} Summary report artifact.
+ */
+function reportArtifactSummary(artifacts) {
+  for (const artifact of [...(artifacts || [])].reverse()) {
+    const kind = String(artifact?.kind || "").toLowerCase();
+    const contentKind = String(artifact?.metadata?.content_kind || "").toLowerCase();
+    if (kind !== "report" && contentKind !== "report") {
+      continue;
+    }
+    const text = String(artifact?.summary || "").trim();
+    if (text) {
+      return text;
+    }
+  }
+  return "";
+}
+
+/**
  * Возвращает markdown-отчет из результата run.
  *
  * @param {object | null} result Ответ `/runs/{run_id}/result`.
  * @returns {string} Текст итогового отчета.
  */
 function reportTextFromResult(result) {
-  return String(result?.final_report || "").trim();
+  const candidates = [
+    result?.final_report,
+    result?.summary?.final_report,
+    result?.final_state?.final_report,
+    assistantMessageText(result?.messages),
+    assistantMessageText(result?.final_state?.messages),
+    finalNodeSummary(result?.nodes),
+    reportArtifactSummary(result?.artifacts),
+  ];
+
+  for (const candidate of candidates) {
+    const text = String(candidate || "").trim();
+    if (text) {
+      return text;
+    }
+  }
+  return "";
+}
+
+/**
+ * Возвращает финальный текст из graph payload, если result endpoint не дал отчет.
+ *
+ * @param {object | null} graph RunGraph payload.
+ * @returns {string} Summary финального узла.
+ */
+function reportTextFromGraph(graph) {
+  return finalNodeSummary(graph?.nodes);
 }
 
 /**
@@ -132,10 +253,18 @@ export function useAnalyticsRun() {
         setPhase(ok ? "done" : "error");
         setStatusText(ok ? "Агент завершил работу." : `Run завершился со статусом: ${nextStatus}`);
         try {
-          await loadReport(nextRunId);
+          const text = await loadReport(nextRunId);
+          if (!text) {
+            setReportText(reportTextFromGraph(graph));
+          }
           await refreshArtifacts(nextRunId);
         } catch (reportError) {
-          setError(`Не удалось загрузить итоговый отчет: ${reportError.message}`);
+          const fallbackText = reportTextFromGraph(graph);
+          if (fallbackText) {
+            setReportText(fallbackText);
+          } else {
+            setError(`Не удалось загрузить итоговый отчет: ${reportError.message}`);
+          }
         }
         return;
       }
@@ -195,7 +324,11 @@ export function useAnalyticsRun() {
         setSelectedNodeId("");
         setPhase("done");
         setStatusText("Run завершен.");
-        setReportText(reportTextFromResult(response.result));
+        setReportText(
+          reportTextFromResult(response.result) ||
+          assistantMessageText(response.messages) ||
+          finalNodeSummary(resultNodes)
+        );
         await refreshArtifacts(nextRunId);
         return true;
       } catch (fallbackError) {

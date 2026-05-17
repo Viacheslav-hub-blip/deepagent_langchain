@@ -1,13 +1,18 @@
 """Spark-like инструмент для чтения локальных CSV-таблиц из examples/data.
 
 Содержит:
-- SparkTableFilter: схема одного фильтра для spark_query_table.
-- SparkTableQueryInput: схема входа для spark_query_table.
+- SparkTableFilter: схема одного фильтра для read_table.
+- SparkTableQueryInput: схема входа для read_table.
 - build_fake_spark_tools: фабрика одного LangChain tool для запросов к Spark-like таблицам.
-- _spark_query_table: выполнение выборки по таблице, полям, фильтрам и лимиту.
+- _read_table_query: выполнение выборки по таблице, полям, фильтрам и лимиту.
 - _load_spark_table: загрузка таблицы по логическому имени.
 - _get_table_registry: создание реестра доступных Spark-like таблиц.
 - _get_table_schema: получение схемы таблицы.
+- _format_unknown_table_error: текст ошибки для неизвестной таблицы.
+- _format_select_columns_error: текст ошибки для пустого или запрещенного select_columns.
+- _format_unknown_columns_error: текст ошибки для отсутствующих колонок.
+- _format_schema_columns_text: компактное описание доступных колонок.
+- _format_close_columns_text: подсказки по похожим именам колонок.
 - _parse_select_columns: разбор строки колонок select_columns в список имен полей.
 - _validate_select_columns_present: проверка, что агент явно указал нужные поля.
 - _validate_query_columns: проверка наличия полей в таблице.
@@ -22,6 +27,7 @@
 from __future__ import annotations
 
 import asyncio
+from difflib import get_close_matches
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -29,6 +35,8 @@ from typing import Any, Literal
 import pandas as pd
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field, model_validator
+
+from planner_agent.runtime.tool_text import ToolTextResult
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 HITS_FILE = "cspfs_repo_features3.hits_extra_info_129372427_view.csv"
@@ -167,19 +175,19 @@ def build_fake_spark_tools(
         day_event_count: Устаревший параметр совместимости, не влияет на результат.
 
     Returns:
-        Список с одним LangChain tool: spark_query_table.
+        Список с одним LangChain tool: read_table.
     """
 
     del transaction_count, day_event_count
     resolved_data_dir = Path(data_dir).resolve() if data_dir else DATA_DIR
 
-    async def spark_query_table(
+    async def read_table(
             table_name: str,
             select_columns: str | None = None,
             filters: list[SparkTableFilter] | None = None,
             max_rows: int = 50,
             include_schema: bool = False,
-    ) -> pd.DataFrame | dict[str, Any]:
+    ) -> pd.DataFrame | str:
         """Выполняет универсальную выборку из Spark-like таблицы.
 
         Args:
@@ -190,10 +198,10 @@ def build_fake_spark_tools(
             include_schema: Признак возврата схемы таблицы.
 
         Returns:
-            DataFrame с результатом выборки или словарь с ошибкой и схемой таблицы.
+            DataFrame с результатом выборки или текстовое описание ошибки и способа исправления.
         """
 
-        return await _spark_query_table(
+        return await _read_table_query(
             table_name=table_name,
             select_columns=select_columns or "",
             filters=filters or [],
@@ -205,16 +213,16 @@ def build_fake_spark_tools(
 
     return [
         StructuredTool.from_function(
-            coroutine=spark_query_table,
-            name="spark_query_table",
+            coroutine=read_table,
+            name="read_table",
             description=(
-                "spark_query_table\n"
+                "read_table\n"
                 "---\n"
                 "Описание: универсальная выборка из Spark-like таблиц. "
                 "Инструмент принимает имя таблицы, строку со списком полей, фильтры и лимит строк, "
                 "а при успешной выборке возвращает pandas DataFrame.\n"
                 "Если в select_columns или filters указанного поля нет в таблице, инструмент "
-                "вернет ok=False, описание ошибки и актуальную схему таблицы. "
+                "вернет текстовую ошибку с кодом, причиной, доступными полями и подсказкой для повтора. "
                 "Выгрузка всех столбцов запрещена: агент должен явно указать "
                 "минимально достаточный набор колонок.\n\n"
                 "Параметры:\n"
@@ -232,7 +240,7 @@ def build_fake_spark_tools(
     ]
 
 
-async def _spark_query_table(
+async def _read_table_query(
         *,
         table_name: str,
         select_columns: str,
@@ -241,7 +249,7 @@ async def _spark_query_table(
         include_schema: bool,
         data_dir: Path,
         delay_seconds: float,
-) -> pd.DataFrame | dict[str, Any]:
+) -> pd.DataFrame | str:
     """Выполняет выборку из Spark-like таблицы с проверкой полей.
 
     Args:
@@ -254,7 +262,7 @@ async def _spark_query_table(
         delay_seconds: Искусственная задержка запроса.
 
     Returns:
-        DataFrame с результатом выборки или словарь с ошибкой и схемой таблицы.
+        DataFrame с результатом выборки или текстовое описание ошибки и способа исправления.
     """
 
     await _fake_sleep(delay_seconds)
@@ -262,40 +270,27 @@ async def _spark_query_table(
     normalized_table_name = table_name.strip()
     table_meta = registry.get(normalized_table_name)
     if table_meta is None:
-        return {
-            "ok": False,
-            "error": {
-                "code": "unknown_table",
-                "message": f"Таблица '{table_name}' не найдена.",
-                "available_tables": sorted(registry),
-            },
-        }
+        return _format_unknown_table_error(table_name=table_name, registry=registry)
 
     table = _load_spark_table(data_dir=data_dir, table_name=normalized_table_name)
     schema = _get_table_schema(table_name=normalized_table_name, source_file=table_meta["file"], table=table)
     parsed_select_columns = _parse_select_columns(select_columns)
     select_error = _validate_select_columns_present(parsed_select_columns)
     if select_error is not None:
-        return {
-            "ok": False,
-            "table_name": normalized_table_name,
-            "source_file": table_meta["file"],
-            "error": select_error,
-            "schema": schema,
-        }
+        return _format_select_columns_error(
+            table_name=normalized_table_name,
+            source_file=table_meta["file"],
+            select_error=select_error,
+            schema=schema,
+        )
     missing_columns = _validate_query_columns(table=table, select_columns=parsed_select_columns, filters=filters)
     if missing_columns:
-        return {
-            "ok": False,
-            "table_name": normalized_table_name,
-            "source_file": table_meta["file"],
-            "error": {
-                "code": "unknown_columns",
-                "message": "В таблице нет одного или нескольких полей из запроса.",
-                "missing_columns": missing_columns,
-            },
-            "schema": schema,
-        }
+        return _format_unknown_columns_error(
+            table_name=normalized_table_name,
+            source_file=table_meta["file"],
+            missing_columns=missing_columns,
+            schema=schema,
+        )
 
     filtered = _apply_filters(table=table, filters=filters)
     result_columns = parsed_select_columns
@@ -356,8 +351,10 @@ def _get_table_registry() -> dict[str, dict[str, str]]:
         "hits_extra_info_129372427_view": {"file": HITS_FILE},
         "uko_event": {"file": UKO_FILE},
         "csp_afpc_sss_inc.uko_event": {"file": UKO_FILE},
+        "cspfs_repo_features3.uko_event": {"file": UKO_FILE},
         "cards_event": {"file": CARDS_FILE},
         "csp_afpc_sss_inc.cards_event": {"file": CARDS_FILE},
+        "cspfs_repo_features3.cards_event": {"file": CARDS_FILE},
         "history_automarking": {"file": HISTORY_AUTOMARKING_FILE},
         "demo_client_timeline": {"file": DEMO_TIMELINE_FILE},
         "source_1": {"file": SOURCE_1_FILE},
@@ -391,6 +388,132 @@ def _get_table_schema(*, table_name: str, source_file: str, table: pd.DataFrame)
             for column in table.columns
         ],
     }
+
+
+def _format_unknown_table_error(*, table_name: str, registry: dict[str, dict[str, str]]) -> str:
+    """Формирует текстовую ошибку для неизвестного имени таблицы.
+
+    Args:
+        table_name: Имя таблицы, переданное агентом.
+        registry: Реестр доступных таблиц и алиасов.
+
+    Returns:
+        Человекочитаемый текст ошибки с доступными вариантами table_name.
+    """
+
+    available_tables = ", ".join(sorted(registry))
+    return ToolTextResult(
+        "Ошибка инструмента read_table: таблица не найдена.\n"
+        "Код ошибки: unknown_table.\n"
+        f"Запрошенная таблица: {table_name!r}.\n"
+        f"Доступные таблицы и алиасы: {available_tables}.\n"
+        "Как исправить: выбери одно из доступных имен table_name и повтори запрос "
+        "с явным минимальным списком select_columns.",
+        is_error=True,
+    )
+
+
+def _format_select_columns_error(
+        *,
+        table_name: str,
+        source_file: str,
+        select_error: dict[str, Any],
+        schema: dict[str, Any],
+) -> str:
+    """Формирует текстовую ошибку для пустого или запрещенного select_columns.
+
+    Args:
+        table_name: Имя таблицы или алиаса.
+        source_file: CSV-файл источника.
+        select_error: Описание ошибки валидации select_columns.
+        schema: Схема таблицы с доступными колонками.
+
+    Returns:
+        Человекочитаемый текст ошибки с подсказкой, как выбрать поля.
+    """
+
+    forbidden_columns = select_error.get("forbidden_columns")
+    forbidden_text = ""
+    if forbidden_columns:
+        forbidden_text = f"\nЗапрещенные маркеры в select_columns: {', '.join(map(str, forbidden_columns))}."
+    return ToolTextResult(
+        "Ошибка инструмента read_table: некорректный список select_columns.\n"
+        f"Код ошибки: {select_error['code']}.\n"
+        f"Таблица: {table_name}; источник: {source_file}.\n"
+        f"Причина: {select_error['message']}{forbidden_text}\n"
+        f"{_format_schema_columns_text(schema=schema)}\n"
+        "Как исправить: повтори запрос с минимальным списком реально нужных колонок, "
+        "например 'event_id, event_dt, epk_id'. Не используй пустую строку, '*' или 'all'.",
+        is_error=True,
+    )
+
+
+def _format_unknown_columns_error(
+        *,
+        table_name: str,
+        source_file: str,
+        missing_columns: list[str],
+        schema: dict[str, Any],
+) -> str:
+    """Формирует текстовую ошибку для колонок, которых нет в таблице.
+
+    Args:
+        table_name: Имя таблицы или алиаса.
+        source_file: CSV-файл источника.
+        missing_columns: Отсутствующие колонки из select_columns или filters.
+        schema: Схема таблицы с доступными колонками.
+
+    Returns:
+        Человекочитаемый текст ошибки с похожими колонками и вариантом повтора.
+    """
+
+    missing_text = ", ".join(missing_columns)
+    close_columns = _format_close_columns_text(missing_columns=missing_columns, schema=schema)
+    close_block = f"\nПохожие доступные поля: {close_columns}." if close_columns else ""
+    return ToolTextResult(
+        "Ошибка инструмента read_table: в таблице нет одного или нескольких полей из запроса.\n"
+        "Код ошибки: unknown_columns.\n"
+        f"Таблица: {table_name}; источник: {source_file}.\n"
+        f"Отсутствующие поля: {missing_text}.{close_block}\n"
+        f"{_format_schema_columns_text(schema=schema)}\n"
+        "Как исправить: замени отсутствующие поля на доступные из схемы либо явно сообщи, "
+        "что skill/план ожидает поля, которых нет в текущей таблице.",
+        is_error=True,
+    )
+
+
+def _format_schema_columns_text(*, schema: dict[str, Any]) -> str:
+    """Формирует компактный текст со списком доступных колонок таблицы.
+
+    Args:
+        schema: Схема таблицы, сформированная ``_get_table_schema``.
+
+    Returns:
+        Текст со всеми именами колонок в порядке схемы.
+    """
+
+    column_names = [str(column["name"]) for column in schema.get("columns", [])]
+    return f"Доступные поля ({len(column_names)}): {', '.join(column_names)}."
+
+
+def _format_close_columns_text(*, missing_columns: list[str], schema: dict[str, Any]) -> str:
+    """Подбирает похожие имена колонок для отсутствующих полей.
+
+    Args:
+        missing_columns: Имена колонок, которых нет в таблице.
+        schema: Схема таблицы с доступными колонками.
+
+    Returns:
+        Строка с подсказками вида ``missing -> candidate1, candidate2`` или пустая строка.
+    """
+
+    available_columns = [str(column["name"]) for column in schema.get("columns", [])]
+    hints: list[str] = []
+    for missing_column in missing_columns:
+        matches = get_close_matches(missing_column, available_columns, n=3, cutoff=0.45)
+        if matches:
+            hints.append(f"{missing_column} -> {', '.join(matches)}")
+    return "; ".join(hints)
 
 
 def _parse_select_columns(select_columns: str) -> list[str]:
