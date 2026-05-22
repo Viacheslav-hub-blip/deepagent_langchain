@@ -2,38 +2,38 @@
 
 Содержит:
 - _build_sandbox: создание пустой Python-песочницы с разрешенными библиотеками.
-- _build_agent: сборка ResearchAgent с sandbox, fake Spark tools и python_analysis.
+- _build_agent: сборка ResearchAgent с sandbox и fake Spark tools.
 - _run_async_before_server_start: синхронный запуск async-кода до старта uvicorn.
 - create_app_with_agent: factory FastAPI приложения для `uvicorn --factory`.
 
 Файл нужен для локального запуска analyst UI так, чтобы кнопка запуска анализа
 работала через реальные endpoints `/api/v1/runs/invoke` и `/api/v1/branches/invoke`,
-а worker мог выполнять Python-код через нативный инструмент `python_analysis`.
+а worker мог выполнять Python-код через `execute_python_code`.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import plotly.express as px
+from langchain_openai import ChatOpenAI
 
 from examples.fake_spark_tools import build_fake_spark_tools
-from model import model as deepseek_model
-from model import gigachat 
 from planner_agent import ResearchAgent
-from sandbox import ClientPythonSandbox
 from planner_agent.http_api import ApiSettings, create_app
 from planner_agent.http_api.config import ApiServices
-
+from sandbox import ClientPythonSandbox
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 EXAMPLE_ROOT = PROJECT_ROOT / "examples"
+DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 
 def _suppress_uvicorn_access_log() -> None:
@@ -55,31 +55,53 @@ def _build_sandbox() -> ClientPythonSandbox:
     return ClientPythonSandbox(allowed_libraries={"pd": pd, "px": px})
 
 
-async def _build_agent() -> ResearchAgent:
-    """Собирает ResearchAgent для UI с fake Spark tools и python_analysis.
+def _build_model() -> ChatOpenAI:
+    """Создает LLM-клиент из переменных окружения без чтения локального `model.py`.
 
     Args:
-        Отсутствуют.
+        Отсутствуют. Используются переменные окружения `OPENROUTER_API_KEY` или
+        `OPENAI_API_KEY`, а также опциональные `AGENT_MODEL`, `OPENAI_BASE_URL`
+        и `OPENROUTER_BASE_URL`.
 
     Returns:
-        ResearchAgent, совместимый с LangChain Runnable API и подключенный к
-        локальной Python-песочнице. Нативный инструмент ``python_analysis``
-        добавляется внутри фабрики агента.
+        Экземпляр ChatOpenAI, готовый для передачи в ResearchAgent.
+
+    Raises:
+        RuntimeError: Если в окружении нет API-ключа для выбранного провайдера.
     """
 
-    sandbox = _build_sandbox()
-    spark_tools = build_fake_spark_tools(
-        delay_seconds=0.5,
-        transaction_count=120,
-        day_event_count=40,
+    openrouter_key = os.getenv("OPENROUTER_API_KEY")
+    openai_key = os.getenv("OPENAI_API_KEY")
+    api_key = openrouter_key or openai_key
+    if not api_key:
+        raise RuntimeError(
+            "Задайте OPENROUTER_API_KEY или OPENAI_API_KEY перед запуском UI API."
+        )
+
+    base_url = (
+        os.getenv("OPENAI_BASE_URL")
+        or os.getenv("OPENROUTER_BASE_URL")
+        or (DEFAULT_OPENROUTER_BASE_URL if openrouter_key else None)
+    )
+    model_name = os.getenv("AGENT_MODEL", "gpt-4o-mini")
+    return ChatOpenAI(
+        api_key=api_key,
+        base_url=base_url,
+        model=model_name,
+        temperature=0.1,
     )
 
+
+async def _build_agent() -> ResearchAgent:
+    """Собирает ResearchAgent для UI с fake Spark tools и execute_python_code."""
+
+    sandbox = _build_sandbox()
+    spark_tools = build_fake_spark_tools(delay_seconds=0.5)
+
     return ResearchAgent(
-        model=gigachat,
+        model=_build_model(),
         sandbox=sandbox,
         tools=spark_tools,
-        code_generator_tool_names=set(),
-        enable_workspace_tools=True,
         workspace_root=str(PROJECT_ROOT),
         sources_dir=str(EXAMPLE_ROOT / "data"),
         contexts_dir=str(PROJECT_ROOT / "skills"),
@@ -134,8 +156,8 @@ def create_app_with_agent():
     """Создает FastAPI приложение с подключенным ResearchAgent.
 
     Args:
-        Отсутствуют. Агент собирается из текущего проекта, `model.py`,
-        fake Spark tools и нативного инструмента `python_analysis`.
+        Отсутствуют. Агент собирается из текущего проекта, переменных окружения,
+        fake Spark tools и `execute_python_code`.
 
     Returns:
         FastAPI приложение, которое раздает статический UI по `/app/` и умеет

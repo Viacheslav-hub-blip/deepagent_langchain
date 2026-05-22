@@ -109,7 +109,6 @@ async def validator_node(
         Command с обновлённым планом и переходом к узлу replanner.
     """
     task: Task = payload.task
-    task_id: str = task.task_id or _FALLBACK_TASK_ID
 
     if task.status == TaskStatus.FAILED:
         task.validation_passed = False

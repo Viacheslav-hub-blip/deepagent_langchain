@@ -6,8 +6,7 @@
 - PromptTemplate: шаблон human prompt для стартового контекста ReAct-агента.
 - Formatting: константы форматирования.
 - _collect_worker_evidence_blocks: блоки задач с приоритетом ``full_result`` для всех шагов плана.
-- _collect_completed_worker_blocks: устаревшая обёртка для тестов совместимости.
-- _collect_results: списки текстовых блоков для completed и failed задач (для тестов и интеграций).
+- _collect_results: списки текстовых блоков для completed и failed задач.
 - _format_task_for_responder: единая функция форматирования блока задачи; параметр ``include_details`` управляет набором полей.
 - _fit_responder_context_budget: подгонка стартового human prompt под общий бюджет.
 - _get_user_query: извлечение исходного запроса пользователя.
@@ -29,7 +28,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -175,16 +173,6 @@ def _collect_worker_evidence_blocks(plan: dict[str, Task]) -> list[str]:
             lines.append("Full worker output: (empty)")
         blocks.append("\n".join(lines))
     return blocks
-
-
-def _collect_completed_worker_blocks(plan: dict[str, Task]) -> list[str]:
-    """Совместимость с тестами: не-failed задачи в формате ``_format_task_for_responder``."""
-
-    return [
-        _format_task_for_responder(task_id, plan[task_id], include_details=False)
-        for task_id in _sort_plan_task_ids(plan)
-        if plan[task_id].status != TaskStatus.FAILED
-    ]
 
 
 def _limit_task_text(text: str, max_chars: int = RESPONDER_MAX_CHARS_PER_TASK) -> str:
@@ -611,25 +599,9 @@ def _normalize_final_markdown(raw: str) -> str:
     return ReportTemplate.HEADER + body
 
 
-def _build_responder_react_tools(
-        *,
-        artifact_service: ArtifactService | None,
-        run_id: str,
-        submitted: list[str],
-) -> list[Any]:
-    """Возвращает пустой список runtime tools responder-а.
+def _build_responder_react_tools() -> list[Any]:
+    """Возвращает пустой список runtime tools responder-а."""
 
-    Args:
-        artifact_service: Сервис чтения artifacts или ``None``.
-        run_id: Идентификатор текущего запуска.
-        submitted: Устаревший буфер submit-ответов, оставлен для совместимости
-            с текущей сигнатурой сборщика tools.
-
-    Returns:
-        Пустой список runtime tools.
-    """
-
-    del artifact_service, run_id, submitted
     return []
 
 
@@ -663,22 +635,9 @@ def _append_responder_react_policy(system_prompt: str) -> str:
     return system_prompt.rstrip() + appendix
 
 
-def _extract_final_markdown_from_react(
-        react_messages: list[Any],
-        submitted: list[str],
-) -> str:
-    """Извлекает итоговый markdown из последнего AIMessage или legacy submit-буфера.
+def _extract_final_markdown_from_react(react_messages: list[Any]) -> str:
+    """Извлекает итоговый markdown из последнего AIMessage responder ReAct-agent."""
 
-    Args:
-        react_messages: Сообщения, возвращенные responder ReAct-agent.
-        submitted: Устаревший буфер submit-ответов для обратной совместимости.
-
-    Returns:
-        Нормализованный markdown финального ответа.
-    """
-
-    if submitted:
-        return _normalize_final_markdown(submitted[-1])
     last_ai = next(
         (m for m in reversed(react_messages) if isinstance(m, AIMessage)),
         None,
@@ -823,12 +782,7 @@ async def responder_node(
         planning_error=planning_error,
     )
     system_prompt = _append_responder_react_policy(prompt)
-    submitted_reports: list[str] = []
-    tools = _build_responder_react_tools(
-        artifact_service=artifact_service,
-        run_id=state.run_id,
-        submitted=submitted_reports,
-    )
+    tools = _build_responder_react_tools()
 
     await _print_content_block("RESPONDER SYSTEM PROMPT", system_prompt)
     prompt_trace_artifacts = write_prompt_trace(
@@ -867,7 +821,7 @@ async def responder_node(
         )
         if tool_call_artifacts:
             prompt_trace_artifacts.update(tool_call_artifacts)
-        final_md = _extract_final_markdown_from_react(react_messages, submitted_reports)
+        final_md = _extract_final_markdown_from_react(react_messages)
         return Command(
             update=_build_final_report_update(
                 state,

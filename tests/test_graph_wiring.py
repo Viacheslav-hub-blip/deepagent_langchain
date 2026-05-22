@@ -25,7 +25,6 @@ class GraphWiringTests(unittest.TestCase):
             model=object(),
             sandbox=FakeSandbox(),
             tools=[],
-            enable_workspace_tools=False,
         )
         self.assertIsNotNone(graph)
 

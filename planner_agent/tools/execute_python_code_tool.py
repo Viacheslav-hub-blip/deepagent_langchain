@@ -1,10 +1,10 @@
 """Нативный инструмент выполнения Python-кода для аналитического агента.
 
 Содержит:
-- PythonAnalysisInput: схема аргументов инструмента выполнения кода.
+- ExecutePythonCodeInput: схема аргументов инструмента выполнения кода.
 - PythonExecutionResult: внутренний контейнер результата выполнения кода.
-- PythonAnalysisTool: LangChain-инструмент проверки, компиляции и выполнения кода.
-- build_python_analysis_tool: фабрика инструмента для подключения к worker.
+- ExecutePythonCodeTool: LangChain-инструмент проверки, компиляции и выполнения кода.
+- build_execute_python_code_tool: фабрика инструмента для подключения к worker.
 - _validate_target_variable: проверка имени целевой переменной.
 - _validate_code_policy: статическая проверка кода перед выполнением.
 - _ensure_common_libraries: добавление популярных аналитических библиотек в sandbox.
@@ -39,7 +39,7 @@ from pydantic import BaseModel, Field, PrivateAttr
 
 from ..runtime.sandbox import PythonSandboxProtocol
 
-PYTHON_ANALYSIS_TOOL_NAME = "execute_python_code"
+EXECUTE_PYTHON_CODE_TOOL_NAME = "execute_python_code"
 MAX_CODE_CHARS = 50_000
 MAX_TEXT_PREVIEW_CHARS = 4_000
 MAX_STDIO_CHARS = 8_000
@@ -90,7 +90,7 @@ DENIED_ATTRIBUTE_CALLS: frozenset[tuple[str, str]] = frozenset(
 )
 
 
-class PythonAnalysisInput(BaseModel):
+class ExecutePythonCodeInput(BaseModel):
     """Аргументы для проверки, компиляции и выполнения Python-кода.
 
     Attributes:
@@ -172,10 +172,10 @@ class PythonExecutionResult:
         return json.dumps(payload, ensure_ascii=False, default=_json_default)
 
 
-class PythonAnalysisTool(BaseTool):
+class ExecutePythonCodeTool(BaseTool):
     """LangChain-инструмент для нативного выполнения Python-кода в sandbox агента."""
 
-    name: str = PYTHON_ANALYSIS_TOOL_NAME
+    name: str = EXECUTE_PYTHON_CODE_TOOL_NAME
     description: str = (
         "Compile and execute Python code in the agent sandbox. Use this tool for "
         "calculations, joins, aggregations, statistics, tabular transformations "
@@ -185,7 +185,7 @@ class PythonAnalysisTool(BaseTool):
         "result variable. Returns structured JSON with generated_code, preview, "
         "stdout/stderr and full traceback when execution fails."
     )
-    args_schema: type[BaseModel] = PythonAnalysisInput
+    args_schema: type[BaseModel] = ExecutePythonCodeInput
 
     _sandbox: PythonSandboxProtocol = PrivateAttr()
     _previous_code: str = PrivateAttr(default="")
@@ -219,7 +219,7 @@ class PythonAnalysisTool(BaseTool):
         *,
         previous_code: str | None = None,
         error_context: str | None = None,
-    ) -> "PythonAnalysisTool":
+    ) -> "ExecutePythonCodeTool":
         """Возвращает копию инструмента с retry-контекстом worker-задачи.
 
         Args:
@@ -227,10 +227,10 @@ class PythonAnalysisTool(BaseTool):
             error_context: Ошибка предыдущей попытки, если она есть.
 
         Returns:
-            Новый экземпляр ``PythonAnalysisTool`` с тем же sandbox.
+            Новый экземпляр ``ExecutePythonCodeTool`` с тем же sandbox.
         """
 
-        return PythonAnalysisTool(
+        return ExecutePythonCodeTool(
             sandbox=self._sandbox,
             previous_code=previous_code or self._previous_code,
             error_context=error_context or self._error_context,
@@ -296,17 +296,17 @@ class PythonAnalysisTool(BaseTool):
         return result.to_json()
 
 
-def build_python_analysis_tool(sandbox: PythonSandboxProtocol) -> PythonAnalysisTool:
+def build_execute_python_code_tool(sandbox: PythonSandboxProtocol) -> ExecutePythonCodeTool:
     """Создает нативный инструмент выполнения Python-кода.
 
     Args:
         sandbox: Изолированная среда агента с доступными переменными.
 
     Returns:
-        Экземпляр ``PythonAnalysisTool`` для регистрации в worker tools.
+        Экземпляр ``ExecutePythonCodeTool`` для регистрации в worker tools.
     """
 
-    return PythonAnalysisTool(sandbox=sandbox)
+    return ExecutePythonCodeTool(sandbox=sandbox)
 
 
 def _normalize_target_variable(target_variable: str | None) -> str | None:
@@ -926,8 +926,8 @@ def _limit_text(value: str | None, *, max_chars: int) -> str:
 
 
 __all__ = [
-    "PYTHON_ANALYSIS_TOOL_NAME",
-    "PythonAnalysisInput",
-    "PythonAnalysisTool",
-    "build_python_analysis_tool",
+    "EXECUTE_PYTHON_CODE_TOOL_NAME",
+    "ExecutePythonCodeInput",
+    "ExecutePythonCodeTool",
+    "build_execute_python_code_tool",
 ]

@@ -92,8 +92,6 @@ class ResearchAgent(Runnable[Any, list[BaseMessage]]):
         sandbox: Объект песочницы или виртуального окружения для workspace tools.
         tools: Список внешних LangChain tools, доступных worker.
         prompts: Опциональный набор промптов агента.
-        code_generator_tool_names: Имена tools, которые нужно оборачивать в code executor.
-        enable_workspace_tools: Добавлять ли минимальные tools чтения/записи файлов.
         workspace_root: Корневая директория рабочего пространства.
         sources_dir: Директория исходных файлов относительно workspace или absolute path.
         contexts_dir: Директория контекстных файлов относительно workspace или absolute path.
@@ -120,8 +118,6 @@ class ResearchAgent(Runnable[Any, list[BaseMessage]]):
             sandbox: Any | None = None,
             tools: list[BaseTool] | None = None,
             prompts: AnalysisAgentPrompts | None = None,
-            code_generator_tool_names: set[str] | None = None,
-            enable_workspace_tools: bool = True,
             workspace_root: str = ".",
             sources_dir: str | None = None,
             contexts_dir: str | None = None,
@@ -168,12 +164,6 @@ class ResearchAgent(Runnable[Any, list[BaseMessage]]):
             sandbox=sandbox,
             tools=tools or [],
             prompts=prompts,
-            code_generator_tool_names=(
-                code_generator_tool_names
-                if code_generator_tool_names is not None
-                else {"generate_python_code"}
-            ),
-            enable_workspace_tools=enable_workspace_tools,
             workspace_root=str(workspace_path),
             sources_dir=sources_dir,
             contexts_dir=contexts_dir,

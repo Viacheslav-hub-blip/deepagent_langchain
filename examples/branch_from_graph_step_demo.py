@@ -45,7 +45,7 @@ def main() -> None:
             summary="Снимок контекста",
             state={"run_id": run.run_id, "step": "context"},
         )
-        n_plan = lineage.create_state_node(
+        lineage.create_state_node(
             run_id=run.run_id,
             node_type="plan_created",
             title="Plan",

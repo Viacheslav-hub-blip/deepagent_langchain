@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from portable_agent_patterns.text_matching import fuzzy_find_and_replace
+from planner_agent.skills_text_matching import fuzzy_find_and_replace
 
 logger = logging.getLogger(__name__)
 

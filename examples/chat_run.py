@@ -16,7 +16,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import pandas as pdfrom langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+import pandas as pd
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -175,7 +176,6 @@ async def main() -> None:
         model=build_fake_model(),
         sandbox=sandbox,
         tools=[],
-        enable_workspace_tools=False,
         workspace_root=str(example_root),
         sources_dir=str(example_root / "data"),
         contexts_dir=str(example_root / "skills"),

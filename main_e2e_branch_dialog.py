@@ -171,17 +171,12 @@ def build_agent() -> ResearchAgent:
 
     examples_root = PROJECT_ROOT / "examples"
     sandbox = ScenarioSandbox(_load_example_dataframe())
-    spark_tools = build_fake_spark_tools(
-        delay_seconds=0.7,
-        transaction_count=260,
-        day_event_count=80,
-    )
+    spark_tools = build_fake_spark_tools(delay_seconds=0.7)
 
     return ResearchAgent(
         model=configured_model,
         sandbox=sandbox,
         tools=spark_tools,
-        enable_workspace_tools=True,
         workspace_root=str(PROJECT_ROOT),
         sources_dir=str(examples_root / "data"),
         contexts_dir=str(examples_root / "skills"),

@@ -1,20 +1,9 @@
-"""Публичные классы локальной песочницы выполнения Python-кода.
+"""Host-side Python sandbox for research-agent workers.
 
-Содержит:
-- ClientPythonSandbox: песочница с персистентными Python-переменными.
-- CodeValidator: статическая проверка кода перед исполнением.
-- ExecutionResult: результат выполнения кода.
-- BaseCodeExecutorTool: LangChain tool-wrapper для генератора Python-кода.
+Exports:
+- ClientPythonSandbox: executes generated Python in a restricted environment.
 """
 
-from __future__ import annotations
+from .sandbox import ClientPythonSandbox
 
-from .executor import BaseCodeExecutorTool
-from .sandbox import ClientPythonSandbox, CodeValidator, ExecutionResult
-
-__all__ = [
-    "BaseCodeExecutorTool",
-    "ClientPythonSandbox",
-    "CodeValidator",
-    "ExecutionResult",
-]
+__all__ = ["ClientPythonSandbox"]

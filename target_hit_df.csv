@@ -1,2 +1,0 @@
-epk_id,event_dt,event_channel,amount,main_rule,policy_action,resolution,event_id
-2099007770421986000001,20260309,CARDS,70986.27,"{""rule_name"":""CARD_DENY_BLACK_LIST_FROM_DBO_2_group_potok"",""rule_id"":""356b4d4c-abd6-48af-b86c-f675aba5a1b6"",""rule_category"":""Behavior Anomaly""}",deny,allow,f9246b19-3bf5-4883-8076-d1d4356a6cf8

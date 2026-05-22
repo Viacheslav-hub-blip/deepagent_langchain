@@ -11,7 +11,6 @@ import unittest
 from asyncio import run
 
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
-from langchain_core.tools import tool
 from langgraph.types import Send
 
 from planner_agent.agent_nodes.critic_node import critic_node
@@ -125,53 +124,6 @@ class CriticNodeTests(unittest.TestCase):
         self.assertEqual(command.goto[0].node, "validator")
         self.assertNotIn("feedback_context", command.update)
         self.assertEqual(command.update["plan"]["1"].retry_count, 0)
-
-    def test_critic_filters_unavailable_tool_recommendations(self) -> None:
-        """Проверяет, что critic не передает worker-у несуществующие tools."""
-
-        @tool("spark_lookup_trigger_cases")
-        def available_tool(event_id: str) -> dict:
-            """Возвращает тестовую сработку по event_id."""
-
-            return {"event_id": event_id}
-
-        task = Task(
-            task_id="1",
-            description="Analyze data",
-            status=TaskStatus.NEEDS_VALIDATION,
-            result_preview="Partial result.",
-        )
-        payload = CriticPayload(
-            worker_payload=WorkerPayload(
-                task=task,
-                context_schemas={},
-                previous_results="",
-            )
-        )
-        llm = FakeListChatModel(
-            responses=[
-                (
-                    '{"approved":false,'
-                    '"reasoning":"Need another source.",'
-                    '"issues":["Call spark_missing_tool for day events."],'
-                    '"improvement_instructions":"Retry with spark_missing_tool."}'
-                )
-            ]
-        )
-
-        command = run(
-            critic_node(
-                payload=payload,
-                llm=llm,
-                prompt=AnalysisAgentPrompts().critic_system,
-                tools=[available_tool],
-            )
-        )
-
-        feedback = command.update["feedback_context"][0]
-        feedback_text = str(feedback)
-        self.assertNotIn("spark_missing_tool", feedback_text)
-        self.assertIn("spark_lookup_trigger_cases", feedback_text)
 
     def test_critic_retry_limit_sends_to_validator(self) -> None:
         """Проверяет, что critic не отправляет worker-а больше двух раз."""

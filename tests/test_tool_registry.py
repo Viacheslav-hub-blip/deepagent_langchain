@@ -72,7 +72,6 @@ class ToolRegistryTests(unittest.TestCase):
             model=object(),
             sandbox=FakeSandbox(),
             tools=[alpha_tool, beta_tool],
-            enable_workspace_tools=False,
             enabled_tool_names={"alpha_tool"},
         )
 

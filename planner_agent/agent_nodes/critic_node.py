@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any, Final
 
 from langchain_core.language_models import BaseChatModel
@@ -104,8 +103,6 @@ async def critic_node(
             issues=[],
             improvement_instructions="",
         )
-    review = _sanitize_review_tool_references(review, available_tools)
-
     feedback = review.model_dump(mode="json")
     feedback["task_id"] = task_id
     feedback["critic_retry_count"] = task.retry_count
@@ -214,49 +211,6 @@ def _build_worker_retry_message(review: WorkerCriticReview) -> str:
     if review.improvement_instructions:
         lines.append(f"Instructions: {review.improvement_instructions}")
     return "\n".join(lines)
-
-
-def _sanitize_review_tool_references(
-        review: WorkerCriticReview,
-        tools: list[BaseTool],
-) -> WorkerCriticReview:
-    """Удаляет из critic feedback имена недоступных инструментов.
-
-    Args:
-        review: Структурированный результат critic-а до нормализации.
-        tools: Список инструментов, реально доступных worker-у.
-
-    Returns:
-        Новый ``WorkerCriticReview`` без ссылок на инструменты, которых нет в
-        текущем списке ``tools``. Если доступные инструменты есть, подозрительные
-        tool-like имена заменяются первым доступным именем, чтобы retry не
-        планировал несуществующий tool.
-    """
-
-    available_names = [tool.name for tool in tools if getattr(tool, "name", "")]
-    if not available_names:
-        return review
-
-    replacement = available_names[0]
-
-    def sanitize_text(text: str) -> str:
-        result = str(text or "")
-        for token in set(re.findall(r"\b[A-Za-z][A-Za-z0-9_]*\b", result)):
-            looks_like_tool = token.startswith("spark_") or token.endswith("_tool")
-            if looks_like_tool and token not in available_names:
-                result = result.replace(token, replacement)
-        return result
-
-    return review.model_copy(
-        update={
-            "reasoning": sanitize_text(review.reasoning),
-            "issues": [sanitize_text(issue) for issue in review.issues],
-            "improvement_instructions": sanitize_text(
-                review.improvement_instructions
-            ),
-        },
-        deep=True,
-    )
 
 
 def _limit_critic_text(text: str, max_chars: int) -> str:

@@ -14,7 +14,7 @@
 - _monitor_run_progress: фоновый мониторинг прогресса запуска.
 - _validate_dataset_files: проверка наличия файлов датасета.
 - _validate_dataset_expectations: проверка контрольных ожиданий кейса.
-- _validate_spark_tool_reads_dataset: проверка чтения нужного data_dir через spark_query_table.
+- _validate_spark_tool_reads_dataset: проверка чтения нужного data_dir через read_table.
 - run_offline_checks: запуск всех проверок без обращения к LLM.
 - build_agent: сборка ResearchAgent с DeepSeek Flash и локальными tools.
 - _invoke_agent_and_stop_monitor: запуск агента и остановка мониторинга.
@@ -423,7 +423,7 @@ def _validate_dataset_expectations() -> list[str]:
 
 
 async def _validate_spark_tool_reads_dataset() -> list[str]:
-    """Проверяет, что spark_query_table читает именно тестовый каталог.
+    """Проверяет, что read_table читает именно тестовый каталог.
 
     Args:
         Отсутствуют.
@@ -445,16 +445,16 @@ async def _validate_spark_tool_reads_dataset() -> list[str]:
         }
     )
     if not isinstance(result, pd.DataFrame):
-        raise AssertionError(f"spark_query_table returned non-DataFrame: {result}")
+        raise AssertionError(f"read_table returned non-DataFrame: {result}")
     if len(result) != 1:
-        raise AssertionError(f"spark_query_table expected one key row, got {len(result)}")
+        raise AssertionError(f"read_table expected one key row, got {len(result)}")
     row = result.iloc[0]
     if str(row["user_id"]) != CLIENT_USER_ID or str(row["epk_id"]) != CLIENT_EPK_ID:
-        raise AssertionError(f"spark_query_table returned wrong client row: {row.to_dict()}")
+        raise AssertionError(f"read_table returned wrong client row: {row.to_dict()}")
     source_file = result.attrs.get("spark_source_file", "")
     if source_file != HITS_FILE:
-        raise AssertionError(f"spark_query_table returned wrong source file: {source_file}")
-    return ["spark_query_table OK: reads test_one_dataset/one_client_antifraud_dataset"]
+        raise AssertionError(f"read_table returned wrong source file: {source_file}")
+    return ["read_table OK: reads test_one_dataset/one_client_antifraud_dataset"]
 
 
 async def run_offline_checks() -> None:
@@ -501,8 +501,6 @@ def build_agent() -> ResearchAgent:
         model=deepseek_model,
         sandbox=sandbox,
         tools=spark_tools,
-        code_generator_tool_names=set(),
-        enable_workspace_tools=True,
         workspace_root=str(PROJECT_ROOT),
         sources_dir=str(DATASET_DIR),
         contexts_dir=str(PROJECT_ROOT / "skills"),

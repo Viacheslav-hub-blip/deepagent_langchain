@@ -40,11 +40,12 @@ from ..runtime.tool_result_capture import (
     capture_tool_result,
     serialize_tool_result,
 )
+from ..runtime.tool_errors import tool_error_possible_causes, tool_error_solution_options
 from ..runtime.tool_text import ToolTextResult, is_tool_error_result
 from ..runtime.sandbox import PythonSandboxProtocol
 from ..schemas.artifacts import Artifact
 from ..services.artifact_service import ArtifactService
-from .python_analysis_tool import PYTHON_ANALYSIS_TOOL_NAME
+from .execute_python_code_tool import EXECUTE_PYTHON_CODE_TOOL_NAME
 
 TOOL_ARTIFACT_SUMMARY_MAX_LEN = 500
 TOOL_ERROR_TRACEBACK_MAX_LEN = 8_000
@@ -616,8 +617,8 @@ def _format_tool_success_response(
         Текстовый ответ инструмента без JSON-обертки.
     """
 
-    if tool_name == PYTHON_ANALYSIS_TOOL_NAME:
-        formatted = _format_python_analysis_tool_response(
+    if tool_name == EXECUTE_PYTHON_CODE_TOOL_NAME:
+        formatted = _format_execute_python_code_tool_response(
             tool_input=tool_input,
             raw_result=captured.content_for_llm,
         )
@@ -655,7 +656,7 @@ def _format_tool_success_response(
     )
 
 
-def _format_python_analysis_tool_response(
+def _format_execute_python_code_tool_response(
         *,
         tool_input: Any,
         raw_result: Any,
@@ -670,7 +671,7 @@ def _format_python_analysis_tool_response(
         Текст для LLM, ``ToolTextResult`` при ошибке выполнения или ``None``.
     """
 
-    payload = _parse_python_analysis_payload(raw_result)
+    payload = _parse_execute_python_code_payload(raw_result)
     if payload is None:
         return None
 
@@ -733,7 +734,7 @@ def _format_python_analysis_tool_response(
     return ToolTextResult(_limit_tool_text("\n".join(lines), max_chars=INLINE_TOOL_RESULT_MAX_CHARS), is_error=True)
 
 
-def _parse_python_analysis_payload(raw_result: Any) -> dict[str, Any] | None:
+def _parse_execute_python_code_payload(raw_result: Any) -> dict[str, Any] | None:
     """Извлекает JSON-ответ execute_python_code из результата tool.
 
     Args:
@@ -905,80 +906,14 @@ def _build_tool_error_payload(
             "message": error_message,
         },
         "tool_input": _limited_serialized(tool_input),
-        "possible_causes": _tool_error_possible_causes(error_type, error_message),
-        "solution_options": _tool_error_solution_options(tool_name, error_type, error_message),
+        "possible_causes": tool_error_possible_causes(error_type),
+        "solution_options": tool_error_solution_options(tool_name, error_type),
         "retry_guidance": (
             "Не повторяй тот же вызов без изменений. Сначала исправь аргументы, "
             "проверь доступные файлы/переменные/artifacts или выбери другой инструмент."
         ),
         "traceback": _limit_tool_text(traceback.format_exc(), max_chars=TOOL_ERROR_TRACEBACK_MAX_LEN),
     }
-
-
-def _tool_error_possible_causes(error_type: str, error_message: str) -> list[str]:
-    """Возвращает вероятные причины ошибки инструмента.
-
-    Args:
-        error_type: Тип исключения.
-        error_message: Текст исключения.
-
-    Returns:
-        Список человекочитаемых причин для LLM.
-    """
-
-    text = f"{error_type}: {error_message}".lower()
-    causes: list[str] = []
-    if "not found" in text or "filenotfound" in text:
-        causes.append("Указанный файл, artifact, таблица или переменная не найдены.")
-    if "outside allowed roots" in text or "permission" in text:
-        causes.append("Запрошенный путь недоступен из текущего workspace или запрещен политикой доступа.")
-    if "unsupported" in text:
-        causes.append("Формат входных данных или файла не поддерживается этим инструментом.")
-    if "missing" in text or "keyerror" in text:
-        causes.append("В аргументах или данных отсутствует обязательное поле/колонка/ключ.")
-    if "valueerror" in text:
-        causes.append("Один из аргументов имеет недопустимое значение или формат.")
-    if not causes:
-        causes.append("Инструмент получил некорректные аргументы или столкнулся с внутренней ошибкой выполнения.")
-    return causes
-
-
-def _tool_error_solution_options(
-        tool_name: str,
-        error_type: str,
-        error_message: str,
-) -> list[str]:
-    """Возвращает варианты исправления ошибки инструмента.
-
-    Args:
-        tool_name: Имя инструмента.
-        error_type: Тип исключения.
-        error_message: Текст исключения.
-
-    Returns:
-        Список практических действий для следующего шага модели.
-    """
-
-    text = f"{error_type}: {error_message}".lower()
-    options = [
-        "Проверь точные имена доступных переменных, файлов и artifacts перед повтором.",
-        "Повтори вызов только после изменения аргументов на основе сообщения об ошибке.",
-    ]
-    if "not found" in text or "filenotfound" in text:
-        options.append("Вызови list/get инструмент для доступных файлов, таблиц или artifacts и выбери существующее имя.")
-    if "unsupported" in text:
-        options.append("Используй поддерживаемый формат или другой инструмент, подходящий для этого типа данных.")
-    if "outside allowed roots" in text or "permission" in text:
-        options.append("Используй путь внутри разрешенного workspace или sources/contexts директории.")
-    if "python" in tool_name.lower() or tool_name == PYTHON_ANALYSIS_TOOL_NAME:
-        options.append(
-            "Исправь код и повтори execute_python_code. "
-            "target_variable указывай только если нужна именованная переменная; "
-            "для print-вывода читай execution_output."
-        )
-    else:
-        options.append("Если инструмент не подходит под задачу, выбери другой доступный tool из prompt.")
-    return options
 
 
 def _format_tool_error_trace_content(

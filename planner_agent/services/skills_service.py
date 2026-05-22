@@ -1,4 +1,4 @@
-"""Skills service backed by Hermes-style portable SkillsStore."""
+"""Skills service backed by planner_agent SkillsStore."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from planner_agent.schemas.skills import SkillPatchProposal, SkillRecord
-from portable_agent_patterns.skills import SkillsStore
+from planner_agent.skills_store import SkillsStore
 
 from ._json import append_jsonl, read_jsonl
 

@@ -20,7 +20,7 @@ from planner_agent.models import FullPlan, PlannedTask, Task, WorkerPayload
 from planner_agent.services.lineage_service import LineageService
 from planner_agent.services.skills_service import SkillsService
 from planner_agent.tools.skill_tools import build_skill_read_tools
-from planner_agent.tools.python_analysis_tool import build_python_analysis_tool
+from planner_agent.tools.execute_python_code_tool import build_execute_python_code_tool
 
 
 class WorkerSkillLoadingTests(unittest.TestCase):
@@ -112,7 +112,7 @@ class WorkerSkillLoadingTests(unittest.TestCase):
                 return self.globals.get(name)
 
         selected = _select_task_tools(
-            [build_python_analysis_tool(FakeSandbox())],
+            [build_execute_python_code_tool(FakeSandbox())],
             Task(
                 task_id="1",
                 description="Run code",

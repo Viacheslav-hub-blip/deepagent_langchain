@@ -163,22 +163,17 @@ def build_fake_spark_tools(
         *,
         delay_seconds: float = 1.5,
         data_dir: str | Path | None = None,
-        transaction_count: int | None = None,
-        day_event_count: int | None = None,
 ) -> list[BaseTool]:
     """Создает один универсальный Spark-like tool для запросов к локальным CSV-таблицам.
 
     Args:
         delay_seconds: Искусственная задержка каждого tool-вызова в секундах.
         data_dir: Директория с CSV-файлами. По умолчанию используется examples/data.
-        transaction_count: Устаревший параметр совместимости, не влияет на результат.
-        day_event_count: Устаревший параметр совместимости, не влияет на результат.
 
     Returns:
         Список с одним LangChain tool: read_table.
     """
 
-    del transaction_count, day_event_count
     resolved_data_dir = Path(data_dir).resolve() if data_dir else DATA_DIR
 
     async def read_table(
