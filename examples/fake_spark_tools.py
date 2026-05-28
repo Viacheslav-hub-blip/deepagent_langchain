@@ -18,6 +18,7 @@
 - _validate_query_columns: проверка наличия полей в таблице.
 - _apply_filters: применение списка фильтров к DataFrame.
 - _apply_filter: применение одного фильтра к DataFrame.
+- _should_compare_as_text: проверка необходимости строкового сравнения фильтра.
 - _get_comparable_series: подготовка колонки к сравнению со значением фильтра.
 - _coerce_filter_value: приведение значения фильтра к типу колонки.
 - _clean_value: преобразование pandas/numpy значения к JSON-совместимому типу.
@@ -147,11 +148,13 @@ class SparkTableQueryInput(BaseModel):
         default_factory=list,
         description="Список фильтров, которые нужно применить к строкам таблицы.",
     )
-    max_rows: int = Field(
-        default=50,
+    max_rows: int | None = Field(
+        default=None,
         ge=0,
-        le=1000,
-        description="Максимальное число строк в ответе. Значение 0 вернет только метаданные.",
+        description=(
+            "Максимальное число строк в ответе. Если значение не передано, "
+            "возвращаются все строки, подходящие под фильтры. Значение 0 вернет пустую выборку."
+        ),
     )
     include_schema: bool = Field(
         default=False,
@@ -180,7 +183,7 @@ def build_fake_spark_tools(
             table_name: str,
             select_columns: str | None = None,
             filters: list[SparkTableFilter] | None = None,
-            max_rows: int = 50,
+            max_rows: int | None = None,
             include_schema: bool = False,
     ) -> pd.DataFrame | str:
         """Выполняет универсальную выборку из Spark-like таблицы.
@@ -189,7 +192,7 @@ def build_fake_spark_tools(
             table_name: Имя таблицы.
             select_columns: Минимально достаточный список полей результата в формате строки "col1, col2, col3".
             filters: Ограничения выборки.
-            max_rows: Максимальное число строк.
+            max_rows: Максимальное число строк. Если не передано, ограничение не применяется.
             include_schema: Признак возврата схемы таблицы.
 
         Returns:
@@ -240,7 +243,7 @@ async def _read_table_query(
         table_name: str,
         select_columns: str,
         filters: list[SparkTableFilter],
-        max_rows: int,
+        max_rows: int | None,
         include_schema: bool,
         data_dir: Path,
         delay_seconds: float,
@@ -251,7 +254,7 @@ async def _read_table_query(
         table_name:  имя таблицы.
         select_columns: Минимально достаточные поля результата в формате строки "col1, col2, col3".
         filters: Список фильтров.
-        max_rows: Максимальное число строк.
+        max_rows: Максимальное число строк. Если не передано, ограничение не применяется.
         include_schema: Признак возврата схемы при успешном ответе.
         data_dir: Директория с CSV-файлами.
         delay_seconds: Искусственная задержка запроса.
@@ -289,7 +292,9 @@ async def _read_table_query(
 
     filtered = _apply_filters(table=table, filters=filters)
     result_columns = parsed_select_columns
-    result = filtered.loc[:, result_columns].head(max(0, int(max_rows))).copy()
+    result = filtered.loc[:, result_columns].copy()
+    if max_rows is not None:
+        result = result.head(max(0, int(max_rows))).copy()
     if include_schema:
         result.attrs["spark_schema"] = schema
     result.attrs["spark_table_name"] = normalized_table_name
@@ -352,9 +357,7 @@ def _get_table_registry() -> dict[str, dict[str, str]]:
         "cspfs_repo_features3.cards_event": {"file": CARDS_FILE},
         "history_automarking": {"file": HISTORY_AUTOMARKING_FILE},
         "demo_client_timeline": {"file": DEMO_TIMELINE_FILE},
-        "source_1": {"file": SOURCE_1_FILE},
-        "source_2": {"file": SOURCE_2_FILE},
-        "source_3": {"file": SOURCE_3_FILE},
+
     }
 
 
@@ -615,6 +618,9 @@ def _apply_filter(*, table: pd.DataFrame, filter_item: SparkTableFilter) -> pd.D
         value = "" if filter_item.value is None else str(filter_item.value)
         return table[series.astype(str).str.contains(value, case=False, na=False, regex=False)].copy()
     if operator == "in":
+        if any(_should_compare_as_text(series=series, value=value) for value in filter_item.values or []):
+            values = [str(value) for value in filter_item.values or []]
+            return table[series.astype(str).isin(values)].copy()
         values = [_coerce_filter_value(series=series, value=value) for value in filter_item.values or []]
         comparable = _get_comparable_series(series=series, value=values[0] if values else None)
         return table[comparable.isin(values)].copy()
@@ -625,8 +631,12 @@ def _apply_filter(*, table: pd.DataFrame, filter_item: SparkTableFilter) -> pd.D
         comparable = _get_comparable_series(series=series, value=left)
         return table[(comparable >= left) & (comparable <= right)].copy()
 
-    value = _coerce_filter_value(series=series, value=filter_item.value)
-    comparable = _get_comparable_series(series=series, value=value)
+    if operator in {"eq", "ne"} and _should_compare_as_text(series=series, value=filter_item.value):
+        value = str(filter_item.value)
+        comparable = series.astype(str)
+    else:
+        value = _coerce_filter_value(series=series, value=filter_item.value)
+        comparable = _get_comparable_series(series=series, value=value)
     if operator == "eq":
         mask = comparable == value
     elif operator == "ne":
@@ -642,6 +652,24 @@ def _apply_filter(*, table: pd.DataFrame, filter_item: SparkTableFilter) -> pd.D
     else:
         raise ValueError(f"Неподдерживаемый оператор фильтра: {operator}")
     return table[mask].copy()
+
+
+def _should_compare_as_text(*, series: pd.Series, value: Any) -> bool:
+    """Проверяет, нужно ли сравнивать значение фильтра как текст.
+
+    Args:
+        series: Колонка, к которой применяется фильтр.
+        value: Значение фильтра из запроса агента.
+
+    Returns:
+        ``True``, если строковое сравнение безопаснее числового приведения.
+    """
+
+    if value is None or pd.api.types.is_numeric_dtype(series):
+        return False
+    if isinstance(value, str):
+        return True
+    return isinstance(value, int) and abs(value) > 2**53 - 1
 
 
 def _get_comparable_series(*, series: pd.Series, value: Any) -> pd.Series:

@@ -31,6 +31,7 @@ model.py
 # Agent run outputs (regenerated locally)
 runs/*
 !runs/.gitkeep
+deep_agent_test/few_shot_examples_index/
 examples/runs/*
 !examples/runs/.gitkeep
 examples/runs_mvp_e2e/

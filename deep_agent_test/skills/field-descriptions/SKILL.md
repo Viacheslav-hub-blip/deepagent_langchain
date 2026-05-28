@@ -1,0 +1,171 @@
+---
+name: field-descriptions
+description: "Справочник полей из таблиц hits, cards_event и uko_event: имена полей и краткий бизнес-смысл каждого поля."
+---
+
+# Описание файла
+
+Справочник полей из доступных источников. Содержит только имена полей и краткое описание смысла каждого поля без описания таблиц.
+
+# Описание полей
+
+- `accept_time_sec` - время подтверждения в секундах.
+- `age` - возраст клиента.
+- `age_category` - возрастная категория клиента.
+- `app_version` - версия приложения.
+- `atm_acquiring_country` - страна эквайера.
+- `atm_acquiring_iic` - идентификатор эквайера.
+- `atm_address` - адрес устройства или ТСТ.
+- `atm_city` - город устройства или ТСТ.
+- `atm_country` - страна устройства или ТСТ.
+- `atm_id` - идентификатор банкомата.
+- `atm_mcc` - MCC торговой точки.
+- `atm_mcc_name` - название MCC.
+- `atm_merchant_id` - идентификатор merchant.
+- `atm_merchant_name` - название merchant или ТСТ.
+- `atm_terminal_id` - идентификатор терминала.
+- `birth_date_client` - дата рождения клиента.
+- `card_bin` - BIN карты.
+- `card_brand` - бренд карты.
+- `card_expire_date` - срок действия карты.
+- `card_info` - данные карты в структуре или JSON.
+- `card_number` - номер карты.
+- `card_owner` - владелец карты.
+- `card_ps` - платежная система карты.
+- `card_type` - тип карты.
+- `cards_client_markers` - карточные маркеры клиента.
+- `cards_dsl_model_receiver_score` - скор получателя карточной модели.
+- `cards_dsl_model_risk_score` - риск-скор карточной модели.
+- `cards_dsl_nspk_fraud_score` - fraud-скор НСПК.
+- `cards_fs_comprpid_marker` - маркер Cards FS ComPRPID.
+- `cards_response_code_1` - код ответа карточного контура.
+- `channel_ext_system` - внешняя система канала.
+- `client_accepted_transfer_to_recipient_ignite` - признак принятых переводов получателю.
+- `client_balance` - баланс клиента на момент операции.
+- `client_card_number` - номер карты клиента.
+- `client_firstname` - имя клиента.
+- `client_groups` - группы клиента.
+- `client_id_document_number` - номер документа клиента.
+- `client_inn` - ИНН клиента.
+- `client_lastname` - фамилия клиента.
+- `client_made_payment_to_recipient` - признак платежа этому получателю.
+- `client_patronymicname` - отчество клиента.
+- `client_phone` - телефон клиента.
+- `client_phone_number` - телефон клиента.
+- `client_transaction_id` - клиентский идентификатор транзакции.
+- `data_transaction_local` - локальная дата транзакции.
+- `dbo_client_markers` - маркеры клиента ДБО.
+- `device_mobile_days_since_first_hit` - возраст мобильного устройства от первого hit.
+- `device_source_sdk` - источник данных устройства SDK.
+- `device_time` - время на устройстве.
+- `dul_number` - номер документа клиента.
+- `dul_type` - тип документа клиента.
+- `epk_id` - идентификатор клиента ЕПК.
+- `event_channel` - канал события.
+- `event_description` - текстовое описание события.
+- `event_dt` - дата события в формате `YYYYMMDD`.
+- `event_dttm_readable` - читаемая дата-время события.
+- `event_id` - идентификатор события. В hits это идентификатор сработки/события; в raw-таблицах это идентификатор исходного события, который может совпадать с hits.
+- `event_time` - время события.
+- `event_type` - тип события.
+- `final_marker_payer` - итоговый маркер плательщика.
+- `fio` - ФИО клиента.
+- `first_name` - имя клиента.
+- `hardware_id` - идентификатор устройства.
+- `has_claim` - признак жалобы клиента.
+- `hits_extra_facts` - дополнительные факты сработки.
+- `index` - технический индекс строки.
+- `indicators_sbp` - индикаторы СБП.
+- `indicators_vk_max` - агрегированные VK-индикаторы.
+- `ip_device` - IP устройства в UKO/ДБО-событиях.
+- `is_save` - флаг предотвращенного мошенничества.
+- `kafka_input_time` - время входа события в Kafka.
+- `kafka_output_time` - время выхода события из Kafka.
+- `last_name` - фамилия клиента.
+- `latitude_ip` - широта по IP.
+- `link_cf` - признаки связей и CF.
+- `load_dt` - дата загрузки.
+- `longitude_ip` - долгота по IP.
+- `main_rule` - основное правило антифрода.
+- `marked_as_not_save_reason` - причина исключения из save.
+- `member_id` - идентификатор участника или банка.
+- `merchant_info` - данные merchant в структуре или JSON.
+- `middle_name` - отчество клиента.
+- `mobile_phone_number` - мобильный телефон.
+- `mobile_sdk_info` - данные mobile SDK в структуре или JSON.
+- `name_os` - название ОС.
+- `number_acc` - номер счета.
+- `operation_id` - идентификатор операции.
+- `os_id` - идентификатор ОС.
+- `own_dt` - дата загрузки или партиции.
+- `own_dttm` - дата-время загрузки.
+- `own_loading_id` - идентификатор загрузки.
+- `p2p_sender_account_number` - счет отправителя P2P.
+- `params` - параметры события.
+- `payee_bank_name` - банк получателя.
+- `payee_phone_number` - телефон получателя.
+- `payee_transfer_type` - тип перевода получателю.
+- `payer_account_number` - счет плательщика.
+- `payer_card_number` - карта плательщика.
+- `payer_inn` - ИНН плательщика.
+- `payer_transfer_type` - тип перевода плательщика.
+- `payment_new_ip_provider` - признак нового IP-провайдера.
+- `payment_transaction_flag` - флаг платежной операции.
+- `phone` - телефон клиента.
+- `phone_brand` - бренд телефона.
+- `phone_model` - модель телефона.
+- `phone_operator` - оператор телефона.
+- `phone_os` - ОС телефона.
+- `policy_action` - решение антифрод-системы.
+- `pos_info` - данные POS в структуре или JSON.
+- `posterious_events` - события после сработки.
+- `posterious_events_additional_info` - детали событий после сработки.
+- `previous_events` - события до сработки.
+- `previous_events_additional_info` - детали событий до сработки.
+- `product` - продукт операции.
+- `product_type` - тип продукта.
+- `purpose` - назначение операции.
+- `recepient_fio` - ФИО получателя в исходном поле.
+- `recipient_bank_name` - банк получателя.
+- `recipient_bik` - БИК получателя.
+- `recipient_info` - данные получателя в структуре или JSON.
+- `recipient_inn` - ИНН получателя.
+- `region_phone_operator` - регион оператора телефона.
+- `resolution_first` - первая резолюция.
+- `resolution_first_dttm` - дата-время первой резолюции.
+- `resolution_last` - последняя резолюция.
+- `resolution_last_dttm` - дата-время последней резолюции.
+- `response_code` - код ответа операции.
+- `risk_score_dsl` - риск-скор DSL.
+- `rules` - список сработавших правил.
+- `sbp_id` - идентификатор СБП.
+- `scoring_oss` - скоринг OSS.
+- `segment` - сегмент клиента.
+- `segment_client` - сегмент клиента.
+- `source_type_accept` - источник подтверждения.
+- `sub_channel` - подканал события.
+- `sub_type` - подтип события.
+- `subrules` - список сработавших подправил.
+- `surface` - клиентская поверхность или интерфейс.
+- `tfm_client_marker` - маркер клиента TFM.
+- `time_transaction_local` - локальное время транзакции.
+- `token_device_ip` - IP токенизированного устройства или карточного события.
+- `transaction_amount` - сумма операции.
+- `transaction_amount_currency` - валюта операции.
+- `transaction_amount_in_rub` - сумма операции в рублях.
+- `transaction_beneficiar_account_number` - счет получателя.
+- `transaction_beneficiar_bik` - БИК получателя.
+- `transaction_beneficiar_nick_name` - ник или название получателя.
+- `transaction_sender_account_number` - счет отправителя.
+- `tree_info` - данные сценария подтверждения.
+- `trust_info` - данные доверенности.
+- `type_accept` - тип подтверждения.
+- `type_operation` - тип операции.
+- `user_id` - идентификатор пользователя.
+- `user_ip_location_city` - город пользователя, определенный по IP в raw-событии.
+- `user_ip_location_country` - страна пользователя, определенная по IP в raw-событии.
+- `user_ip_location_country_code` - код страны пользователя, определенный по IP в raw-событии.
+- `user_ip_location_region` - регион пользователя, определенный по IP в raw-событии.
+- `user_login_id` - идентификатор логина.
+- `user_mobile_hardware_id_days_since_first_hit` - возраст hardware_id от первого hit.
+- `version_mp` - версия мобильного приложения.

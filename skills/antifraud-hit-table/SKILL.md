@@ -1,21 +1,22 @@
 ---
 name: antifraud-hit-table
-description: Разбор антифрод-сработки по event_id — правило, policy_action, резолюции, save, жалоба; выбор сырой таблицы событий (cards vs uko).
+description: "Сработки антифрода по hits: event_id, policy_action, main_rule, резолюции, is_save, жалобы и выбор raw-истории."
 ---
-# Сработки: `cspfs_repo_features3.hits_extra_info_129372427_view`
 
-Только операции с срабатыванием фрод-мониторинга (не полная история клиента).
+# Hit Table
 
-**Идентификация и время:** `event_id`, `event_dt`, `event_time`
+Описание: точка входа для вопросов по таблице сработок.
 
-**Канал → сырая история:** `event_channel`, `surface`, `product` → см. skills `antifraud-cards-event-table` / `antifraud-uko-event-table`
+Источник: `cspfs_repo_features3.hits_extra_info_129372427_view`.
 
-**Деньги и операция:** `transaction_amount_in_rub`, `type_operation`, `sub_channel`, `event_type` / `sub_type`, `purpose`, `payment_transaction_flag`, `client_balance`
+Открой:
 
-**Антифрод:** `policy_action` (allow/review/deny — не финальная резолюция), `main_rule`, `resolution_first` / `resolution_last`, `accept_time_sec`
+- `../_shared/data-sources.md` - поля, ключи, связь с raw-историей;
+- `../_shared/antifraud-core.md` - смысл `policy_action`, резолюций и ограничений;
+- `../antifraud-matrix-2-0/reference.md` - если задача про `is_save`, `previous_events` или `posterious_events`.
 
-**Save / жалобы:** `is_save`, `marked_as_not_save_reason`, `has_claim`
+Правила:
 
-**Краткий контекст (не замена полной истории):** `previous_events`, `posterious_events`
-
-**Правила:** `policy_action` ≠ итоговая резолюция; для поведения до/после — выгрузка из `cards_event` или `uko_event`, не только hits.
+- hits - это только сработки, не полная история клиента;
+- поведение до/после проверяется через `cards_event` или `uko_event`;
+- `policy_action` не является резолюцией.

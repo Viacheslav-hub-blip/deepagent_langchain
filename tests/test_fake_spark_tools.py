@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from pathlib import Path
 
 import pandas as pd
 
@@ -185,6 +186,45 @@ class FakeSparkToolsTests(unittest.TestCase):
         self.assertGreater(len(result), 0)
         for value in result["epk_id"]:
             self.assertEqual(str(value), "2099007770421986000001")
+
+    def test_read_table_filters_large_identifier_without_float_precision_loss(self) -> None:
+        """Проверяет фильтрацию больших идентификаторов без float-приведения.
+
+        Args:
+            Отсутствуют.
+
+        Returns:
+            None.
+        """
+
+        tool = build_fake_spark_tools(delay_seconds=0.0, data_dir=Path("deep_agent_test/data"))[0]
+        result = asyncio.run(
+            tool.ainvoke(
+                {
+                    "table_name": "csp_afpc_sss_inc.uko_event",
+                    "select_columns": "event_id, epk_id, event_dt, user_ip_location_city, ip_device",
+                    "filters": [
+                        {
+                            "column": "epk_id",
+                            "operator": "eq",
+                            "value": "2099007770421989000001",
+                        },
+                        {
+                            "column": "event_dt",
+                            "operator": "eq",
+                            "value": "20260124",
+                        },
+                    ],
+                    "max_rows": 10,
+                }
+            )
+        )
+
+        self.assertIsInstance(result, pd.DataFrame)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result.iloc[0]["event_id"], "3486d84b-4eba-4ba4-b044-94764fc9e7a4")
+        self.assertEqual(result.iloc[0]["user_ip_location_city"], "Moscow")
+        self.assertEqual(result.iloc[0]["ip_device"], "95.31.146.230")
 
     def test_read_table_returns_schema_for_missing_column(self) -> None:
         """Проверяет возврат схемы таблицы при несуществующем поле.

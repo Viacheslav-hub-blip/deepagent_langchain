@@ -21,10 +21,10 @@ model = ChatOpenAI(
     # model="nvidia/nemotron-3-super-120b-a12b",
     # model="qwen/qwen3.5-397b-a17b",
     # google/gemini-3-pro-preview
-    #model="google/gemini-2.5-flash",
+    model="google/gemini-2.5-flash",
     #model="deepseek/deepseek-v4-flash",
-    #model="google/gemini-2.5-flash",
-    model="openrouter/owl-alpha",
+    #model="google/gemini-2.5-flash-lite",
+    #model="tencent/hy3-preview",
     # model="kwaipilot/kat-coder-pro:free",
     temperature=0.1,
     timeout=120,
@@ -36,7 +36,7 @@ embeddings = OpenAIEmbeddings(
     base_url="https://openrouter.ai/api/v1",
 
     # 2. Передаем ключ OpenRouter
-    api_key="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",
+    api_key="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",
 
     # 3. Указываем модель (OpenRouter требует указывать провайдера, например 'openai/')
     model="openai/text-embedding-3-small",

@@ -22,6 +22,11 @@ api = [
 dev = [
   "pytest>=8.0.0",
 ]
+deep-agent-test = [
+  "deepagents>=0.6.3",
+  "langchain-core>=1.4.0",
+  "langgraph>=1.1.11",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -38,4 +43,7 @@ ignore = ["E501"]
 "examples/*.py" = ["E402"]
 
 [tool.setuptools.packages.find]
-include = ["planner_agent*", "sandbox"]
+include = ["planner_agent*", "sandbox", "deep_agent_test*"]
+
+[tool.setuptools.package-data]
+deep_agent_test = ["config/*.json", "few_shot_examples/*.md", "data/*.csv", "skills/**/*.md"]

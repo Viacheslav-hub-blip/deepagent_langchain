@@ -1,0 +1,13 @@
+event_dt,event_time,event_description,transaction_amount,event_channel,event_type,policy_action,main_rule_name,resolution_last,source
+2026-01-24,08:00:00,Оплата обучения,118410.2,CARDS,PURCHASE,deny,DENY новый образовательный получатель и высокий риск устройства,deny,hits
+2026-01-24,08:00:00,Оплата обучения,118410.2,ISSUER,PURCHASE,N/A,N/A,N/A,cards_event
+2026-01-24,14:30:30,Покупка по карте в торговой точке,8259.46,ISSUER,PURCHASE,N/A,N/A,N/A,cards_event
+2026-01-24,14:35:45,Оплата услуг ЖКХ,5672.54,MOBILE,PAYMENT,N/A,N/A,N/A,uko_event
+2026-01-25,10:38:34,Оплата занятий с репетитором,24276.29,ISSUER,PURCHASE,N/A,N/A,N/A,cards_event
+2026-01-25,10:43:49,Оплата онлайн-курсов,68413.12,MOBILE,PAYMENT,N/A,N/A,N/A,uko_event
+2026-01-26,18:46:38,Оплата учебных материалов,7981.19,ISSUER,PURCHASE,N/A,N/A,N/A,cards_event
+2026-01-26,19:01:23,Оплата образовательной платформы,80405.92,MOBILE,PAYMENT,N/A,N/A,N/A,uko_event
+2026-01-27,08:24:12,Оплата мобильной связи,2191.66,ISSUER,PURCHASE,N/A,N/A,N/A,cards_event
+2026-01-27,08:29:27,Перевод С2С из Сбербанка в сторонний Банк,110351.92,MOBILE,PAYMENT,N/A,N/A,N/A,uko_event
+2026-01-28,10:07:01,Оплата онлайн-курсов,59500.79,MOBILE,PAYMENT,N/A,N/A,N/A,uko_event
+2026-01-30,17:03:09,Оплата экзамена,25262.51,MOBILE,PAYMENT,deny,DENY нетипичная сумма оплаты курсов,allow,hits
