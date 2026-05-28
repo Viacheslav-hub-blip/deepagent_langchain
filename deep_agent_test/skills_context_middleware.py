@@ -5,8 +5,12 @@
 - PreloadedSkillsContextMiddleware.before_agent: чтение skills и запись context в state.
 - PreloadedSkillsContextMiddleware.wrap_model_call: добавление skills context в system prompt.
 - build_preloaded_skills_context: автосканирование папки skills и сборка compact context.
+- select_relevant_skill_paths_with_llm: выбор релевантных skills по index через LLM.
 - discover_skill_context_files: поиск файлов SKILL.md для предзагрузки.
+- build_skills_index: построение компактного index skills.
 - _read_context_file: чтение одного context-файла с ограничением размера.
+- _latest_user_query: получение последнего пользовательского запроса из state.
+- _parse_skill_index_entry: извлечение имени и описания skill.
 - _virtual_skill_path: построение виртуального пути skills для найденного файла.
 - _normalize_virtual_dir: нормализация виртуальной папки skills.
 - _truncate_text: ограничение длины текста skill.
@@ -14,18 +18,31 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
+from pydantic import BaseModel, Field
 
 from deepagents.middleware._utils import append_to_system_message
 
 from deep_agent_test.agent_logging import DeepAgentEventLogger
 from deep_agent_test.plan_approval_middleware import AnalyticsPlanState
 from deep_agent_test.prompts import PRELOADED_SKILLS_CONTEXT_PROMPT_TEMPLATE
+
+
+class SelectedSkillPaths(BaseModel):
+    """Результат выбора релевантных skills перед запуском агента.
+
+    Attributes:
+        paths: Виртуальные пути выбранных файлов ``SKILL.md``.
+    """
+
+    paths: list[str] = Field(default_factory=list, description="Виртуальные пути выбранных skill-файлов.")
 
 
 @dataclass(frozen=True)
@@ -36,6 +53,7 @@ class PreloadedSkillsContextMiddleware(AgentMiddleware[AnalyticsPlanState]):
         skills_root: Локальная папка проекта, которую нужно рекурсивно просканировать.
         skills_virtual_dir: Виртуальная папка skills внутри DeepAgents backend.
         max_chars_per_file: Максимальная длина текста одного ``SKILL.md`` в context.
+        model: Chat model для выбора релевантных skills по index. Если ``None``, загружаются все skills.
         event_logger: Файловый логгер для записи загруженных skills.
 
     Returns:
@@ -45,6 +63,7 @@ class PreloadedSkillsContextMiddleware(AgentMiddleware[AnalyticsPlanState]):
     skills_root: Path
     skills_virtual_dir: str = "/skills/"
     max_chars_per_file: int = 6000
+    model: Any | None = None
     event_logger: DeepAgentEventLogger | None = None
 
     state_schema = AnalyticsPlanState
@@ -64,13 +83,16 @@ class PreloadedSkillsContextMiddleware(AgentMiddleware[AnalyticsPlanState]):
             Обновление state с context и списком прочитанных skill-файлов.
         """
 
-        if state.get("skills_context_loaded"):
+        user_query = _latest_user_query(state)
+        if state.get("skills_context_loaded") and state.get("preloaded_skills_selection_user_key") == user_query:
             return None
 
         context, loaded_paths = build_preloaded_skills_context(
             skills_root=self.skills_root,
             skills_virtual_dir=self.skills_virtual_dir,
             max_chars_per_file=self.max_chars_per_file,
+            model=self.model,
+            user_query=user_query,
         )
         if self.event_logger is not None:
             self.event_logger.log_loaded_skills(
@@ -83,6 +105,7 @@ class PreloadedSkillsContextMiddleware(AgentMiddleware[AnalyticsPlanState]):
             )
         return {
             "skills_context_loaded": True,
+            "preloaded_skills_selection_user_key": user_query,
             "preloaded_skill_paths": loaded_paths,
             "preloaded_skills_context": context,
         }
@@ -117,6 +140,8 @@ def build_preloaded_skills_context(
     skills_root: Path,
     skills_virtual_dir: str,
     max_chars_per_file: int,
+    model: Any | None = None,
+    user_query: str = "",
 ) -> tuple[str, list[str]]:
     """Сканирует папку skills и собирает compact context из файлов ``SKILL.md``.
 
@@ -124,21 +149,129 @@ def build_preloaded_skills_context(
         skills_root: Локальная папка проекта ``skills`` или другая переданная папка.
         skills_virtual_dir: Виртуальная папка, через которую DeepAgents видит skills.
         max_chars_per_file: Максимальная длина текста одного ``SKILL.md``.
+        model: Chat model для LLM-выбора skills по index.
+        user_query: Последний пользовательский запрос для выбора skills.
 
     Returns:
         Кортеж из общего markdown-context и списка виртуальных путей загруженных skills.
     """
 
+    skill_files = discover_skill_context_files(skills_root)
+    selected_paths = select_relevant_skill_paths_with_llm(
+        model=model,
+        user_query=user_query,
+        skill_files=skill_files,
+        skills_root=skills_root,
+        skills_virtual_dir=skills_virtual_dir,
+    )
+    selected_path_set = set(selected_paths)
     blocks: list[str] = []
     loaded_paths: list[str] = []
-    for skill_path in discover_skill_context_files(skills_root):
+    for skill_path in skill_files:
+        virtual_path = _virtual_skill_path(skills_root, skill_path, skills_virtual_dir)
+        if selected_path_set and virtual_path not in selected_path_set:
+            continue
         content = _read_context_file(skill_path, max_chars_per_file)
         if content is None:
             continue
-        virtual_path = _virtual_skill_path(skills_root, skill_path, skills_virtual_dir)
         loaded_paths.append(virtual_path)
         blocks.append(f"### {virtual_path}\n\n{content}")
     return "\n\n".join(blocks), loaded_paths
+
+
+def select_relevant_skill_paths_with_llm(
+    *,
+    model: Any | None,
+    user_query: str,
+    skill_files: list[Path],
+    skills_root: Path,
+    skills_virtual_dir: str,
+) -> list[str]:
+    """Выбирает релевантные skills через LLM по компактному index.
+
+    Args:
+        model: Chat model с поддержкой ``with_structured_output``.
+        user_query: Последний пользовательский запрос.
+        skill_files: Найденные файлы ``SKILL.md``.
+        skills_root: Корневая папка локальных skills.
+        skills_virtual_dir: Виртуальная папка skills внутри DeepAgents.
+
+    Returns:
+        Список виртуальных путей выбранных skills. Если LLM недоступна или ничего не выбрала,
+        возвращается полный список путей как безопасный fallback.
+    """
+
+    index = build_skills_index(
+        skill_files=skill_files,
+        skills_root=skills_root,
+        skills_virtual_dir=skills_virtual_dir,
+    )
+    all_paths = [item["path"] for item in index]
+    if model is None or not user_query.strip() or not index:
+        return all_paths
+
+    structured_model = model.with_structured_output(SelectedSkillPaths)
+    try:
+        result = structured_model.invoke(
+            [
+                SystemMessage(
+                    content=(
+                        "Ты выбираешь domain skills для аналитического агента. "
+                        "Используй только пути из переданного index. "
+                        "Выбери минимальный набор skills, достаточный для понимания запроса, "
+                        "выбора источников, полей и ключей связи. Не добавляй знания вне index. "
+                        "Верни только paths."
+                    )
+                ),
+                HumanMessage(
+                    content=json.dumps(
+                        {
+                            "user_query": user_query,
+                            "skills_index": index,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                ),
+            ]
+        )
+    except Exception:
+        return all_paths
+
+    allowed = set(all_paths)
+    selected = [path for path in result.paths if path in allowed]
+    return selected or all_paths
+
+
+def build_skills_index(
+    *,
+    skill_files: list[Path],
+    skills_root: Path,
+    skills_virtual_dir: str,
+) -> list[dict[str, str]]:
+    """Строит компактный index skills для LLM-выбора.
+
+    Args:
+        skill_files: Найденные файлы ``SKILL.md``.
+        skills_root: Корневая папка локальных skills.
+        skills_virtual_dir: Виртуальная папка skills внутри DeepAgents.
+
+    Returns:
+        Список словарей с путем, именем и описанием skill.
+    """
+
+    index: list[dict[str, str]] = []
+    for skill_path in skill_files:
+        content = _read_context_file(skill_path, max_chars=4000) or ""
+        parsed = _parse_skill_index_entry(content)
+        index.append(
+            {
+                "path": _virtual_skill_path(skills_root, skill_path, skills_virtual_dir),
+                "name": parsed.get("name") or skill_path.parent.name,
+                "description": parsed.get("description") or "",
+            }
+        )
+    return index
 
 
 def discover_skill_context_files(skills_root: Path) -> list[Path]:
@@ -175,6 +308,43 @@ def _read_context_file(path: Path, max_chars: int) -> str | None:
         return None
     content = path.read_text(encoding="utf-8")
     return _truncate_text(content, max_chars)
+
+
+def _latest_user_query(state: AnalyticsPlanState) -> str:
+    """Извлекает последний пользовательский запрос из state.
+
+    Args:
+        state: Текущий state агента.
+
+    Returns:
+        Текст последнего HumanMessage или пустая строка.
+    """
+
+    for message in reversed(state.get("messages", [])):
+        if isinstance(message, HumanMessage):
+            return str(message.content)
+        if getattr(message, "type", None) == "human":
+            return str(getattr(message, "content", ""))
+    return ""
+
+
+def _parse_skill_index_entry(content: str) -> dict[str, str]:
+    """Извлекает имя и описание skill из front matter.
+
+    Args:
+        content: Текст ``SKILL.md``.
+
+    Returns:
+        Словарь с ключами ``name`` и ``description`` при наличии данных.
+    """
+
+    result: dict[str, str] = {}
+    for line in content.splitlines()[:20]:
+        if line.startswith("name:"):
+            result["name"] = line.split(":", 1)[1].strip().strip('"')
+        if line.startswith("description:"):
+            result["description"] = line.split(":", 1)[1].strip().strip('"')
+    return result
 
 
 def _virtual_skill_path(skills_root: Path, path: Path, skills_virtual_dir: str) -> str:
@@ -234,5 +404,7 @@ def _truncate_text(text: str, max_chars: int) -> str:
 __all__ = [
     "PreloadedSkillsContextMiddleware",
     "build_preloaded_skills_context",
+    "build_skills_index",
     "discover_skill_context_files",
+    "select_relevant_skill_paths_with_llm",
 ]

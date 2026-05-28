@@ -230,7 +230,8 @@ def run_python_analysis(task: str, code: str, input_data: Any | None = None) -> 
         структурированный результат выполнения кода.
     """
 
-    namespace = {"input_data": input_data}
+    normalized_input_data = _normalize_python_analysis_input_data(input_data)
+    namespace = {"input_data": normalized_input_data}
     try:
         _validate_python_code_without_delete_operations(code)
         with _temporary_delete_operation_guard():
@@ -252,6 +253,27 @@ def run_python_analysis(task: str, code: str, input_data: Any | None = None) -> 
         "artifacts": namespace.get("artifacts", []),
     }
     return _format_python_analysis_tool_result(payload)
+
+
+def _normalize_python_analysis_input_data(input_data: Any) -> Any:
+    """Нормализует input_data для python-analysis без потери обратной совместимости.
+
+    Если в инструмент пришла JSON-строка, пытается распарсить ее в dict/list.
+    При ошибке парсинга возвращает исходное значение без исключения.
+    """
+
+    if not isinstance(input_data, str):
+        return input_data
+    stripped = input_data.strip()
+    if not stripped:
+        return input_data
+    if stripped[0] not in {"{", "["}:
+        return input_data
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return input_data
+    return parsed
 
 
 class DeleteOperationError(ValueError):
@@ -765,11 +787,12 @@ def build_analytics_deep_agent(
     if data_tools is None:
         data_tools = build_data_tools(settings)
     analysis_tools = [run_python_analysis, build_analysis_artifact, save_analysis_file]
-    tools = [clarify_analysis_request, *analysis_tools]
+    tools = [clarify_analysis_request]
     skills_context_middleware = PreloadedSkillsContextMiddleware(
         skills_root=settings.skills_root,
         skills_virtual_dir=settings.skills_virtual_dir,
         max_chars_per_file=settings.max_chars_per_skill,
+        model=model,
         event_logger=event_logger,
     )
     update_few_shot_examples_index(

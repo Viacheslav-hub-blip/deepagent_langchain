@@ -2,20 +2,35 @@
 
 Содержит:
 - SparkTableFilter: схема одного фильтра для read_table.
+- SparkTableAggregation: схема одной агрегации для read_table.
+- SparkTableOrderBy: схема сортировки результата read_table.
+- SparkColumnOperation: схема вычисляемой колонки read_table.
 - SparkTableQueryInput: схема входа для read_table.
 - build_fake_spark_tools: фабрика одного LangChain tool для запросов к Spark-like таблицам.
 - _read_table_query: выполнение выборки по таблице, полям, фильтрам и лимиту.
+- _apply_derived_columns: добавление вычисляемых колонок к DataFrame.
+- _build_derived_column: расчет одной вычисляемой колонки.
+- _apply_aggregations: выполнение агрегаций по всей таблице или группам.
+- _aggregate_series: расчет одной агрегатной функции по Series.
+- _aggregation_alias: получение имени итоговой колонки агрегации.
+- _apply_order_by: сортировка результата.
 - _load_spark_table: загрузка таблицы по логическому имени.
 - _get_table_registry: создание реестра доступных Spark-like таблиц.
 - _get_table_schema: получение схемы таблицы.
 - _format_unknown_table_error: текст ошибки для неизвестной таблицы.
 - _format_select_columns_error: текст ошибки для пустого или запрещенного select_columns.
 - _format_unknown_columns_error: текст ошибки для отсутствующих колонок.
+- _format_invalid_event_dt_filter_error: текст ошибки для некорректного формата фильтра event_dt.
 - _format_schema_columns_text: компактное описание доступных колонок.
 - _format_close_columns_text: подсказки по похожим именам колонок.
 - _parse_select_columns: разбор строки колонок select_columns в список имен полей.
 - _validate_select_columns_present: проверка, что агент явно указал нужные поля.
 - _validate_query_columns: проверка наличия полей в таблице.
+- _validate_aggregation_columns: проверка наличия полей агрегаций в таблице.
+- _validate_order_columns: проверка наличия полей сортировки в таблице.
+- _validate_derived_columns: проверка наличия исходных полей вычисляемых колонок.
+- _validate_event_dt_filters: проверка формата значений фильтра event_dt.
+- _is_yyyymmdd_value: проверка значения на формат YYYYMMDD.
 - _apply_filters: применение списка фильтров к DataFrame.
 - _apply_filter: применение одного фильтра к DataFrame.
 - _should_compare_as_text: проверка необходимости строкового сравнения фильтра.
@@ -66,6 +81,9 @@ FilterOperator = Literal[
 # Только JSON-примитивы: GigaChat и др. провайдеры отклоняют схему с Any
 # (в tool JSON Schema получается anyOf: [{}, {"type": "null"}] без type у первой ветки).
 FilterScalar = str | int | float | bool
+AggregationFunction = Literal["count", "count_distinct", "min", "max", "sum", "mean"]
+OrderDirection = Literal["asc", "desc"]
+ColumnOperation = Literal["year", "month", "year_month", "date", "lower", "upper", "length", "abs"]
 
 
 class SparkTableFilter(BaseModel):
@@ -122,6 +140,57 @@ class SparkTableFilter(BaseModel):
         return self
 
 
+class SparkTableAggregation(BaseModel):
+    """Описывает одну агрегатную операцию для выборки из Spark-like таблицы.
+
+    Args:
+        function: Агрегатная функция: count, count_distinct, min, max, sum или mean.
+        column: Имя поля, по которому нужно выполнить агрегацию.
+        alias: Необязательное имя итоговой колонки.
+
+    Returns:
+        Валидированное описание агрегатной операции.
+    """
+
+    function: AggregationFunction = Field(description="Агрегатная функция: count, count_distinct, min, max, sum, mean.")
+    column: str = Field(description="Имя поля для агрегации.")
+    alias: str | None = Field(default=None, description="Имя итоговой колонки. Если не задано, будет создано автоматически.")
+
+
+class SparkTableOrderBy(BaseModel):
+    """Описывает сортировку результата выборки.
+
+    Args:
+        column: Имя поля результата, по которому нужно сортировать.
+        direction: Направление сортировки: asc или desc.
+
+    Returns:
+        Валидированное описание сортировки.
+    """
+
+    column: str = Field(description="Имя поля результата для сортировки.")
+    direction: OrderDirection = Field(default="asc", description="Направление сортировки: asc или desc.")
+
+
+class SparkColumnOperation(BaseModel):
+    """Описывает вычисляемую колонку на основе одного исходного поля.
+
+    Args:
+        name: Имя новой колонки.
+        source_column: Исходная колонка таблицы.
+        operation: Операция над исходной колонкой: year, month, year_month, date, lower, upper, length или abs.
+
+    Returns:
+        Валидированное описание вычисляемой колонки.
+    """
+
+    name: str = Field(description="Имя новой вычисляемой колонки.")
+    source_column: str = Field(description="Исходная колонка таблицы.")
+    operation: ColumnOperation = Field(
+        description="Операция над колонкой: year, month, year_month, date, lower, upper, length или abs.",
+    )
+
+
 class SparkTableQueryInput(BaseModel):
     """Параметры универсальной выборки из Spark-like таблицы.
 
@@ -129,6 +198,10 @@ class SparkTableQueryInput(BaseModel):
         table_name: Логическое имя таблицы из списка доступных таблиц.
         select_columns: Минимально достаточный непустой список полей в формате строки "col1, col2, col3".
         filters: Ограничения для отбора строк.
+        derived_columns: Вычисляемые колонки, которые нужно добавить перед фильтрацией, агрегацией или сортировкой.
+        group_by: Поля группировки для агрегаций в формате строки "col1, col2".
+        aggregations: Агрегатные операции, которые нужно выполнить после фильтрации.
+        order_by: Правила сортировки результата.
         max_rows: Максимальное число строк в ответе.
         include_schema: Если True, добавить схему таблицы даже при успешной выборке.
 
@@ -147,6 +220,22 @@ class SparkTableQueryInput(BaseModel):
     filters: list[SparkTableFilter] = Field(
         default_factory=list,
         description="Список фильтров, которые нужно применить к строкам таблицы.",
+    )
+    derived_columns: list[SparkColumnOperation] = Field(
+        default_factory=list,
+        description="Список вычисляемых колонок, которые добавляются перед фильтрацией, агрегацией и сортировкой.",
+    )
+    group_by: str | None = Field(
+        default=None,
+        description="Поля группировки для aggregations в формате 'col1, col2'. Без aggregations не применяется.",
+    )
+    aggregations: list[SparkTableAggregation] = Field(
+        default_factory=list,
+        description="Список агрегатных функций после фильтрации: count, count_distinct, min, max, sum, mean.",
+    )
+    order_by: list[SparkTableOrderBy] = Field(
+        default_factory=list,
+        description="Список правил сортировки итогового результата.",
     )
     max_rows: int | None = Field(
         default=None,
@@ -183,6 +272,10 @@ def build_fake_spark_tools(
             table_name: str,
             select_columns: str | None = None,
             filters: list[SparkTableFilter] | None = None,
+            derived_columns: list[SparkColumnOperation] | None = None,
+            group_by: str | None = None,
+            aggregations: list[SparkTableAggregation] | None = None,
+            order_by: list[SparkTableOrderBy] | None = None,
             max_rows: int | None = None,
             include_schema: bool = False,
     ) -> pd.DataFrame | str:
@@ -192,6 +285,10 @@ def build_fake_spark_tools(
             table_name: Имя таблицы.
             select_columns: Минимально достаточный список полей результата в формате строки "col1, col2, col3".
             filters: Ограничения выборки.
+            derived_columns: Вычисляемые колонки, которые добавляются перед фильтрацией, агрегацией и сортировкой.
+            group_by: Поля группировки для агрегаций в формате строки "col1, col2".
+            aggregations: Агрегатные операции после фильтрации.
+            order_by: Правила сортировки итогового результата.
             max_rows: Максимальное число строк. Если не передано, ограничение не применяется.
             include_schema: Признак возврата схемы таблицы.
 
@@ -203,6 +300,10 @@ def build_fake_spark_tools(
             table_name=table_name,
             select_columns=select_columns or "",
             filters=filters or [],
+            derived_columns=derived_columns or [],
+            group_by=group_by,
+            aggregations=aggregations or [],
+            order_by=order_by or [],
             max_rows=max_rows,
             include_schema=include_schema,
             data_dir=resolved_data_dir,
@@ -217,7 +318,8 @@ def build_fake_spark_tools(
                 "read_table\n"
                 "---\n"
                 "Описание: универсальная выборка из Spark-like таблиц. "
-                "Инструмент принимает имя таблицы, строку со списком полей, фильтры и лимит строк, "
+                "Инструмент принимает имя таблицы, строку со списком полей, фильтры, "
+                "вычисляемые колонки, группировки, агрегации, сортировку и лимит строк, "
                 "а при успешной выборке возвращает pandas DataFrame.\n"
                 "Если в select_columns или filters указанного поля нет в таблице, инструмент "
                 "вернет текстовую ошибку с кодом, причиной, доступными полями и подсказкой для повтора. "
@@ -229,8 +331,16 @@ def build_fake_spark_tools(
                 "в формате 'col1, col2, col3'. Пустая строка, '*' и 'all' запрещены.\n"
                 "  filters (list[dict], опц.) — фильтры вида "
                 "{column, operator, value/values}. Операторы: eq, ne, gt, gte, lt, lte, "
-                "contains, in, between, is_null, not_null.\n"
-                "  max_rows (int, опц., 50) — максимум строк в ответе, от 0 до 1000.\n"
+                "contains, in, between, is_null, not_null. Для event_dt значения должны быть "
+                "датами YYYYMMDD; месяц YYYYMM нужно задавать через between по границам месяца "
+                "или через derived_columns year_month.\n"
+                "  derived_columns (list[dict], опц.) — вычисляемые поля вида "
+                "{name, source_column, operation}. Операции: year, month, year_month, date, lower, upper, length, abs.\n"
+                "  group_by (str, опц.) — поля группировки для aggregations в формате 'col1, col2'.\n"
+                "  aggregations (list[dict], опц.) — агрегаты вида {function, column, alias}. "
+                "Функции: count, count_distinct, min, max, sum, mean.\n"
+                "  order_by (list[dict], опц.) — сортировка вида {column, direction}, direction: asc или desc.\n"
+                "  max_rows (int, опц.) — максимум строк в ответе; если не передан, лимит не применяется.\n"
                 "  include_schema (bool, опц., False) — вернуть схему при успешной выборке."
             ),
             args_schema=SparkTableQueryInput,
@@ -243,6 +353,10 @@ async def _read_table_query(
         table_name: str,
         select_columns: str,
         filters: list[SparkTableFilter],
+        derived_columns: list[SparkColumnOperation],
+        group_by: str | None,
+        aggregations: list[SparkTableAggregation],
+        order_by: list[SparkTableOrderBy],
         max_rows: int | None,
         include_schema: bool,
         data_dir: Path,
@@ -254,6 +368,10 @@ async def _read_table_query(
         table_name:  имя таблицы.
         select_columns: Минимально достаточные поля результата в формате строки "col1, col2, col3".
         filters: Список фильтров.
+        derived_columns: Вычисляемые колонки, которые добавляются перед фильтрацией, агрегацией и сортировкой.
+        group_by: Поля группировки для агрегаций в формате строки "col1, col2".
+        aggregations: Список агрегатных операций после фильтрации.
+        order_by: Правила сортировки итогового результата.
         max_rows: Максимальное число строк. Если не передано, ограничение не применяется.
         include_schema: Признак возврата схемы при успешном ответе.
         data_dir: Директория с CSV-файлами.
@@ -271,8 +389,19 @@ async def _read_table_query(
         return _format_unknown_table_error(table_name=table_name, registry=registry)
 
     table = _load_spark_table(data_dir=data_dir, table_name=normalized_table_name)
+    source_schema = _get_table_schema(table_name=normalized_table_name, source_file=table_meta["file"], table=table)
+    missing_derived_columns = _validate_derived_columns(table=table, derived_columns=derived_columns)
+    if missing_derived_columns:
+        return _format_unknown_columns_error(
+            table_name=normalized_table_name,
+            source_file=table_meta["file"],
+            missing_columns=sorted(set(missing_derived_columns)),
+            schema=source_schema,
+        )
+    table = _apply_derived_columns(table=table, derived_columns=derived_columns)
     schema = _get_table_schema(table_name=normalized_table_name, source_file=table_meta["file"], table=table)
     parsed_select_columns = _parse_select_columns(select_columns)
+    group_by_columns = _parse_select_columns(group_by or "")
     select_error = _validate_select_columns_present(parsed_select_columns)
     if select_error is not None:
         return _format_select_columns_error(
@@ -281,18 +410,47 @@ async def _read_table_query(
             select_error=select_error,
             schema=schema,
         )
-    missing_columns = _validate_query_columns(table=table, select_columns=parsed_select_columns, filters=filters)
+    aggregate_output_columns = [*group_by_columns, *[_aggregation_alias(item) for item in aggregations]]
+    known_output_columns = aggregate_output_columns if aggregations else []
+    missing_columns = _validate_query_columns(
+        table=table,
+        select_columns=parsed_select_columns,
+        filters=filters,
+        known_output_columns=known_output_columns,
+    )
+    missing_columns.extend(_validate_aggregation_columns(table=table, aggregations=aggregations, group_by=group_by_columns))
     if missing_columns:
         return _format_unknown_columns_error(
             table_name=normalized_table_name,
             source_file=table_meta["file"],
-            missing_columns=missing_columns,
+            missing_columns=sorted(set(missing_columns)),
             schema=schema,
+        )
+    invalid_event_dt_filters = _validate_event_dt_filters(filters=filters)
+    if invalid_event_dt_filters:
+        return _format_invalid_event_dt_filter_error(
+            table_name=normalized_table_name,
+            source_file=table_meta["file"],
+            invalid_filters=invalid_event_dt_filters,
         )
 
     filtered = _apply_filters(table=table, filters=filters)
-    result_columns = parsed_select_columns
-    result = filtered.loc[:, result_columns].copy()
+    if aggregations:
+        result = _apply_aggregations(table=filtered, group_by=group_by_columns, aggregations=aggregations)
+    else:
+        result_columns = parsed_select_columns
+        result = filtered.loc[:, result_columns].copy()
+
+    missing_order_columns = _validate_order_columns(table=result, order_by=order_by)
+    if missing_order_columns:
+        result_schema = _get_table_schema(table_name=normalized_table_name, source_file=table_meta["file"], table=result)
+        return _format_unknown_columns_error(
+            table_name=normalized_table_name,
+            source_file=table_meta["file"],
+            missing_columns=missing_order_columns,
+            schema=result_schema,
+        )
+    result = _apply_order_by(table=result, order_by=order_by)
     if max_rows is not None:
         result = result.head(max(0, int(max_rows))).copy()
     if include_schema:
@@ -318,6 +476,154 @@ def _load_spark_table(*, data_dir: Path, table_name: str) -> pd.DataFrame:
     table_meta = _get_table_registry()[table_name]
     path = data_dir / table_meta["file"]
     return _load_csv_table(str(path.resolve())).copy()
+
+
+def _apply_derived_columns(*, table: pd.DataFrame, derived_columns: list[SparkColumnOperation]) -> pd.DataFrame:
+    """Добавляет вычисляемые колонки к таблице.
+
+    Args:
+        table: Исходная таблица.
+        derived_columns: Описания вычисляемых колонок.
+
+    Returns:
+        Копия таблицы с добавленными вычисляемыми колонками.
+    """
+
+    result = table.copy()
+    for operation in derived_columns:
+        result[operation.name] = _build_derived_column(table=result, operation=operation)
+    return result
+
+
+def _build_derived_column(*, table: pd.DataFrame, operation: SparkColumnOperation) -> pd.Series:
+    """Рассчитывает одну вычисляемую колонку.
+
+    Args:
+        table: Таблица с исходной колонкой.
+        operation: Описание операции над колонкой.
+
+    Returns:
+        Series с рассчитанными значениями новой колонки.
+    """
+
+    source = table[operation.source_column]
+    if operation.operation == "lower":
+        return source.astype("string").str.lower()
+    if operation.operation == "upper":
+        return source.astype("string").str.upper()
+    if operation.operation == "length":
+        return source.astype("string").str.len()
+    if operation.operation == "abs":
+        return pd.to_numeric(source, errors="coerce").abs()
+
+    source_text = source.astype("string").str.replace(r"\D", "", regex=True)
+    if operation.operation == "year":
+        return source_text.str.slice(0, 4)
+    if operation.operation == "month":
+        return source_text.str.slice(4, 6)
+    if operation.operation == "year_month":
+        return source_text.str.slice(0, 6)
+    if operation.operation == "date":
+        return source_text.str.slice(0, 8)
+    raise ValueError(f"Неподдерживаемая операция вычисляемой колонки: {operation.operation}")
+
+
+def _apply_aggregations(
+        *,
+        table: pd.DataFrame,
+        group_by: list[str],
+        aggregations: list[SparkTableAggregation],
+) -> pd.DataFrame:
+    """Выполняет агрегатные операции по всей таблице или по группам.
+
+    Args:
+        table: Отфильтрованная таблица.
+        group_by: Поля группировки.
+        aggregations: Список агрегатных операций.
+
+    Returns:
+        DataFrame с результатом агрегаций.
+    """
+
+    if not group_by:
+        row = {
+            _aggregation_alias(aggregation): _aggregate_series(
+                series=table[aggregation.column],
+                function=aggregation.function,
+            )
+            for aggregation in aggregations
+        }
+        return pd.DataFrame([row])
+
+    rows: list[dict[str, Any]] = []
+    grouped = table.groupby(group_by, dropna=False, sort=False)
+    for group_key, group in grouped:
+        key_values = group_key if isinstance(group_key, tuple) else (group_key,)
+        row = dict(zip(group_by, key_values, strict=False))
+        for aggregation in aggregations:
+            row[_aggregation_alias(aggregation)] = _aggregate_series(
+                series=group[aggregation.column],
+                function=aggregation.function,
+            )
+        rows.append(row)
+    return pd.DataFrame(rows, columns=[*group_by, *[_aggregation_alias(item) for item in aggregations]])
+
+
+def _aggregate_series(*, series: pd.Series, function: AggregationFunction) -> Any:
+    """Рассчитывает одну агрегатную функцию по колонке.
+
+    Args:
+        series: Колонка для агрегации.
+        function: Имя агрегатной функции.
+
+    Returns:
+        Скалярный результат агрегации.
+    """
+
+    if function == "count":
+        return int(series.count())
+    if function == "count_distinct":
+        return int(series.nunique(dropna=True))
+    if function in {"sum", "mean"}:
+        numeric = pd.to_numeric(series, errors="coerce")
+        value = numeric.sum() if function == "sum" else numeric.mean()
+        return _clean_value(value)
+    if function == "min":
+        return _clean_value(series.min())
+    if function == "max":
+        return _clean_value(series.max())
+    raise ValueError(f"Неподдерживаемая агрегатная функция: {function}")
+
+
+def _aggregation_alias(aggregation: SparkTableAggregation) -> str:
+    """Возвращает имя итоговой колонки для агрегатной операции.
+
+    Args:
+        aggregation: Описание агрегатной операции.
+
+    Returns:
+        Явный alias или автоматически построенное имя колонки.
+    """
+
+    return aggregation.alias or f"{aggregation.function}_{aggregation.column}"
+
+
+def _apply_order_by(*, table: pd.DataFrame, order_by: list[SparkTableOrderBy]) -> pd.DataFrame:
+    """Сортирует таблицу по одному или нескольким полям.
+
+    Args:
+        table: Таблица результата.
+        order_by: Правила сортировки.
+
+    Returns:
+        Отсортированная копия таблицы.
+    """
+
+    if not order_by:
+        return table
+    columns = [item.column for item in order_by]
+    ascending = [item.direction == "asc" for item in order_by]
+    return table.sort_values(by=columns, ascending=ascending, na_position="last").copy()
 
 
 @lru_cache(maxsize=16)
@@ -480,6 +786,41 @@ def _format_unknown_columns_error(
     )
 
 
+def _format_invalid_event_dt_filter_error(
+        *,
+        table_name: str,
+        source_file: str,
+        invalid_filters: list[SparkTableFilter],
+) -> str:
+    """Формирует текст ошибки для некорректного формата фильтра по event_dt.
+
+    Args:
+        table_name: Имя таблицы или алиаса.
+        source_file: CSV-файл источника.
+        invalid_filters: Фильтры по event_dt с некорректным форматом значений.
+
+    Returns:
+        Человекочитаемый текст ошибки с правилом корректного фильтра по event_dt.
+    """
+
+    filters_text = "; ".join(
+        f"operator={item.operator}, value={item.value}, values={item.values}"
+        for item in invalid_filters
+    )
+    return ToolTextResult(
+        "Ошибка инструмента read_table: некорректный формат значения для поля event_dt.\n"
+        "Код ошибки: invalid_event_dt_filter.\n"
+        f"Таблица: {table_name}; источник: {source_file}.\n"
+        f"Некорректные фильтры: {filters_text}.\n"
+        "Поле event_dt хранит дневную дату в формате YYYYMMDD. "
+        "Для фильтра за месяц используй operator=between и values вида "
+        "[\"YYYYMM01\", \"YYYYMMDD\"] с последним днем месяца либо создай "
+        "derived_columns с operation=year_month и фильтруй вычисляемую колонку по YYYYMM. "
+        "Не используй event_dt eq YYYYMM.",
+        is_error=True,
+    )
+
+
 def _format_schema_columns_text(*, schema: dict[str, Any]) -> str:
     """Формирует компактный текст со списком доступных колонок таблицы.
 
@@ -563,6 +904,7 @@ def _validate_query_columns(
         table: pd.DataFrame,
         select_columns: list[str],
         filters: list[SparkTableFilter],
+        known_output_columns: list[str] | None = None,
 ) -> list[str]:
     """Проверяет, что все запрошенные поля есть в таблице.
 
@@ -570,14 +912,114 @@ def _validate_query_columns(
         table: Таблица для проверки.
         select_columns: Поля результата.
         filters: Фильтры, поля которых нужно проверить.
+        known_output_columns: Дополнительные поля результата, которые появятся после агрегаций.
 
     Returns:
         Отсортированный список отсутствующих полей.
     """
 
+    available_columns = set(table.columns)
+    available_columns.update(known_output_columns or [])
     requested_columns = set(select_columns)
     requested_columns.update(filter_item.column for filter_item in filters)
+    return sorted(column for column in requested_columns if column not in available_columns)
+
+
+def _validate_aggregation_columns(
+        *,
+        table: pd.DataFrame,
+        aggregations: list[SparkTableAggregation],
+        group_by: list[str],
+) -> list[str]:
+    """Проверяет наличие колонок, используемых в агрегациях и группировках.
+
+    Args:
+        table: Таблица после добавления вычисляемых колонок.
+        aggregations: Агрегатные операции.
+        group_by: Поля группировки.
+
+    Returns:
+        Отсортированный список отсутствующих колонок.
+    """
+
+    requested_columns = set(group_by)
+    requested_columns.update(aggregation.column for aggregation in aggregations)
     return sorted(column for column in requested_columns if column not in table.columns)
+
+
+def _validate_order_columns(*, table: pd.DataFrame, order_by: list[SparkTableOrderBy]) -> list[str]:
+    """Проверяет наличие колонок сортировки в итоговом результате.
+
+    Args:
+        table: Итоговая таблица до сортировки.
+        order_by: Правила сортировки.
+
+    Returns:
+        Отсортированный список отсутствующих колонок сортировки.
+    """
+
+    requested_columns = {item.column for item in order_by}
+    return sorted(column for column in requested_columns if column not in table.columns)
+
+
+def _validate_derived_columns(*, table: pd.DataFrame, derived_columns: list[SparkColumnOperation]) -> list[str]:
+    """Проверяет наличие исходных колонок для вычисляемых полей.
+
+    Args:
+        table: Исходная таблица.
+        derived_columns: Описания вычисляемых колонок.
+
+    Returns:
+        Отсортированный список отсутствующих исходных колонок.
+    """
+
+    requested_columns = {item.source_column for item in derived_columns}
+    return sorted(column for column in requested_columns if column not in table.columns)
+
+
+def _validate_event_dt_filters(*, filters: list[SparkTableFilter]) -> list[SparkTableFilter]:
+    """Проверяет, что фильтры по event_dt используют дневной формат YYYYMMDD.
+
+    Args:
+        filters: Список фильтров read_table.
+
+    Returns:
+        Список фильтров по event_dt, где значения переданы не в формате YYYYMMDD.
+    """
+
+    invalid_filters: list[SparkTableFilter] = []
+    for filter_item in filters:
+        if filter_item.column != "event_dt" or filter_item.operator in {"is_null", "not_null"}:
+            continue
+        if filter_item.operator == "between":
+            values = filter_item.values or []
+            if any(not _is_yyyymmdd_value(value) for value in values):
+                invalid_filters.append(filter_item)
+            continue
+        if filter_item.operator == "in":
+            values = filter_item.values or []
+            if any(not _is_yyyymmdd_value(value) for value in values):
+                invalid_filters.append(filter_item)
+            continue
+        if filter_item.operator == "contains" or not _is_yyyymmdd_value(filter_item.value):
+            invalid_filters.append(filter_item)
+    return invalid_filters
+
+
+def _is_yyyymmdd_value(value: FilterScalar | None) -> bool:
+    """Проверяет, что значение выглядит как дата YYYYMMDD.
+
+    Args:
+        value: Значение фильтра, переданное агентом.
+
+    Returns:
+        True, если значение является строкой из восьми цифр или целым числом из восьми цифр.
+    """
+
+    if value is None or isinstance(value, bool):
+        return False
+    text_value = str(value).strip()
+    return len(text_value) == 8 and text_value.isdigit()
 
 
 def _apply_filters(*, table: pd.DataFrame, filters: list[SparkTableFilter]) -> pd.DataFrame:

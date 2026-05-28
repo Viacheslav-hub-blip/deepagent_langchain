@@ -15,13 +15,15 @@
 - collect_edit_feedback: сбор текстовых правок на естественном языке.
 - continue_until_agent_boundary: автоматическое продолжение до interrupt или финального state.
 - should_continue_agent_loop: проверка необходимости автоматического продолжения.
+- agent_boundary_reason: определение причины остановки автоматического продолжения.
 - build_continue_instruction: создание служебной инструкции runner-а.
 - requires_progress_after_decisions: проверка необходимости продолжения после HITL.
 - print_loaded_skills_once: вывод списка загруженных skills один раз за сессию runner-а.
 - print_turn_result: вывод ответа агента.
+- resolve_agent_state: получение полного checkpoint-state после invoke/resume.
 - extract_interrupt_values: извлечение interrupt payload из результата LangGraph.
 - last_agent_response_text: извлечение последнего содержательного ответа агента.
-- last_message_has_tool_calls: проверка tool calls у последнего сообщения.
+- has_pending_tool_calls: проверка незавершенных tool calls.
 - has_unfinished_todos: проверка незавершенных todo в state.
 - has_completed_todos: проверка завершенных todo в state.
 - has_only_final_response_todo_in_progress: проверка, что остался только финальный ответ.
@@ -34,9 +36,13 @@
 
 from __future__ import annotations
 
+import logging
+import json
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from langchain_core.messages import AIMessage
 from langchain_core.tools import BaseTool
 from langchain_core.tools.structured import StructuredTool
 from langgraph.types import Command
@@ -48,6 +54,9 @@ from deep_agent_test.settings import DeepAgentSettings, load_deep_agent_settings
 EXIT_COMMANDS = {"exit", "quit", "q", "выход", "стоп"}
 HITL_DECISION_COMMANDS = {"approve", "a", "ok", "да", "edit", "e", "reject", "r", "нет"}
 TEST_DATA_DIR = Path(__file__).resolve().parent / "data"
+DEFAULT_MAX_AUTO_CONTINUE_STEPS = 20
+DEFAULT_MAX_STAGNANT_AUTO_CONTINUE_STEPS = 2
+LOGGER = logging.getLogger(__name__)
 
 
 def build_chat_agent(settings: DeepAgentSettings | None = None, data_tools: list[BaseTool] | None = None) -> Any:
@@ -94,12 +103,12 @@ def build_test_data_tools(data_dir: Path = TEST_DATA_DIR) -> list[BaseTool]:
             kwargs: Аргументы ``read_table``: table_name, select_columns, filters, max_rows и include_schema.
 
         Returns:
-            DataFrame с результатом выборки или текстовая ошибка инструмента.
+            Машинно-читаемый текст с результатом выборки или текстовая ошибка инструмента.
         """
 
         import asyncio
 
-        return asyncio.run(raw_tool.ainvoke(kwargs))
+        return _format_read_table_output(asyncio.run(raw_tool.ainvoke(kwargs)))
 
     async def read_table_async(**kwargs: Any) -> Any:
         """Выполняет тестовый ``read_table`` из асинхронного runner-а.
@@ -108,10 +117,10 @@ def build_test_data_tools(data_dir: Path = TEST_DATA_DIR) -> list[BaseTool]:
             kwargs: Аргументы ``read_table``: table_name, select_columns, filters, max_rows и include_schema.
 
         Returns:
-            DataFrame с результатом выборки или текстовая ошибка инструмента.
+            Машинно-читаемый текст с результатом выборки или текстовая ошибка инструмента.
         """
 
-        return await raw_tool.ainvoke(kwargs)
+        return _format_read_table_output(await raw_tool.ainvoke(kwargs))
 
     return [
         StructuredTool.from_function(
@@ -122,6 +131,66 @@ def build_test_data_tools(data_dir: Path = TEST_DATA_DIR) -> list[BaseTool]:
             args_schema=raw_tool.args_schema,
         )
     ]
+
+
+def _format_read_table_output(value: Any) -> Any:
+    """Преобразует DataFrame из тестового ``read_table`` в полный JSON-preview.
+
+    Args:
+        value: Результат исходного fake Spark tool: DataFrame или текст ошибки.
+
+    Returns:
+        Исходный текст ошибки либо строка с полными строками результата, чтобы
+        subagent видел фактические значения полей без pandas-усечения ``...``.
+    """
+
+    if not hasattr(value, "to_dict") or not hasattr(value, "columns"):
+        return value
+
+    rows = [
+        {column: _format_read_table_cell(column, item) for column, item in row.items()}
+        for row in value.to_dict(orient="records")
+    ]
+    payload = {
+        "status": "success",
+        "table_name": value.attrs.get("spark_table_name"),
+        "source_file": value.attrs.get("spark_source_file"),
+        "total_rows": value.attrs.get("spark_total_rows"),
+        "matched_rows": value.attrs.get("spark_matched_rows", len(rows)),
+        "returned_rows": len(rows),
+        "columns": list(value.columns),
+        "rows": rows,
+    }
+    schema = value.attrs.get("spark_schema")
+    if schema is not None:
+        payload["schema"] = schema
+    return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def _format_read_table_cell(column: str, value: Any) -> Any:
+    """Готовит значение ячейки read_table для JSON-ответа агенту.
+
+    Args:
+        column: Имя колонки результата.
+        value: Значение ячейки из DataFrame.
+
+    Returns:
+        Значение, пригодное для JSON. Идентификаторы, даты и время возвращаются
+        строками, чтобы не терять точность и формат ключей связи.
+    """
+
+    if value is None or value != value:
+        return None
+    normalized_column = column.lower()
+    if (
+        normalized_column.endswith("_id")
+        or normalized_column in {"event_id", "epk_id", "user_id", "event_dt", "event_time", "operation_id"}
+        or "transaction_id" in normalized_column
+    ):
+        return str(value)
+    if hasattr(value, "item"):
+        return value.item()
+    return value
 
 
 def make_config(thread_id: str) -> dict[str, dict[str, str]]:
@@ -325,6 +394,8 @@ def continue_until_agent_boundary(
     result: Any,
     *,
     require_progress: bool = False,
+    max_auto_continue_steps: int = DEFAULT_MAX_AUTO_CONTINUE_STEPS,
+    max_stagnant_steps: int = DEFAULT_MAX_STAGNANT_AUTO_CONTINUE_STEPS,
 ) -> Any:
     """Продолжает выполнение до interrupt или state без незавершенных todo.
 
@@ -333,19 +404,52 @@ def continue_until_agent_boundary(
         config: Config LangGraph с thread_id.
         result: Последний результат ``agent.invoke`` или ``resume``.
         require_progress: Нужно ли требовать следующий tool/subagent шаг после HITL.
+        max_auto_continue_steps: Максимальное количество служебных продолжений
+            за один пользовательский ход.
+
+        max_stagnant_steps: Максимальное число подряд идущих итераций, где
+            состояние задачи не меняется по ключевым признакам (todo/status
+            и последний инструментальный результат). Защищает от бесконечного
+            повторения одинаковых шагов.
 
     Returns:
         Последний результат после автоматического продолжения или исходный результат.
     """
 
-    current = result
+    current = resolve_agent_state(agent, config, result)
+    auto_continue_steps = 0
+    stagnant_steps = 0
+    previous_signature = auto_continue_signature(current)
     while True:
-        if extract_interrupt_values(current):
+        boundary_reason = agent_boundary_reason(current, require_progress=require_progress)
+        if boundary_reason != "continue":
+            LOGGER.debug("Остановка автопродолжения агента: %s.", boundary_reason)
             return current
-        if not should_continue_agent_loop(current, require_progress=require_progress):
+
+        if auto_continue_steps >= max_auto_continue_steps:
+            LOGGER.warning(
+                "Остановка автопродолжения агента: max_steps. Выполнено служебных продолжений: %s.",
+                auto_continue_steps,
+            )
             return current
+
         continue_instruction = build_continue_instruction(current, require_progress=require_progress)
-        current = invoke_user_message(agent, config, continue_instruction)
+        raw_result = invoke_user_message(agent, config, continue_instruction)
+        auto_continue_steps += 1
+        current = resolve_agent_state(agent, config, raw_result)
+        current_signature = auto_continue_signature(current)
+        if current_signature == previous_signature:
+            stagnant_steps += 1
+            if stagnant_steps >= max(1, max_stagnant_steps):
+                LOGGER.warning(
+                    "Остановка автопродолжения агента: stagnant_state. "
+                    "Обнаружено повторение состояния %s раз подряд.",
+                    stagnant_steps,
+                )
+                return current
+        else:
+            stagnant_steps = 0
+        previous_signature = current_signature
         if has_unfinished_todos(current) or has_completed_todos(current) or extract_interrupt_values(current):
             require_progress = False
 
@@ -365,13 +469,36 @@ def should_continue_agent_loop(result: Any, *, require_progress: bool) -> bool:
         return False
     if extract_interrupt_values(result):
         return False
-    if last_message_has_tool_calls(result):
+    if has_pending_tool_calls(result):
         return False
     return (
         has_unfinished_todos(result)
         or needs_final_response_after_completed_todos(result)
         or (require_progress and not has_completed_todos(result))
     )
+
+
+def agent_boundary_reason(result: Any, *, require_progress: bool) -> str:
+    """Определяет причину продолжения или остановки runner-а.
+
+    Args:
+        result: Полный state graph или interrupt payload.
+        require_progress: Нужно ли требовать следующий tool/subagent шаг после HITL.
+
+    Returns:
+        Строковый код причины: ``continue``, ``interrupt``, ``pending_tool_call``,
+        ``no_unfinished_todos`` или ``invalid_state``.
+    """
+
+    if not isinstance(result, dict):
+        return "invalid_state"
+    if extract_interrupt_values(result):
+        return "interrupt"
+    if has_pending_tool_calls(result):
+        return "pending_tool_call"
+    if should_continue_agent_loop(result, require_progress=require_progress):
+        return "continue"
+    return "no_unfinished_todos"
 
 
 def build_continue_instruction(result: Any, *, require_progress: bool) -> str:
@@ -417,6 +544,73 @@ def requires_progress_after_decisions(decisions: list[dict[str, Any]]) -> bool:
     """
 
     return any(decision.get("type") in {"approve", "edit", "respond"} for decision in decisions)
+
+
+def auto_continue_signature(result: Any) -> tuple[Any, ...]:
+    """Строит компактную сигнатуру state для детекции зацикливания runner-а.
+
+    Args:
+        result: Текущий state graph.
+
+    Returns:
+        Кортеж со стабильными признаками прогресса: todos, последний tool call и
+        последний tool result.
+    """
+
+    if not isinstance(result, dict):
+        return ("invalid_state", type(result).__name__)
+    todos_signature = _todos_signature(result.get("todos"))
+    last_tool_call_signature = _last_tool_call_signature(result.get("messages"))
+    last_tool_message_signature = _last_tool_message_signature(result.get("messages"))
+    return (todos_signature, last_tool_call_signature, last_tool_message_signature)
+
+
+def _todos_signature(todos: Any) -> tuple[tuple[str, str], ...]:
+    """Преобразует todo state в стабильный кортеж (content, status)."""
+
+    if not isinstance(todos, list):
+        return ()
+    signature: list[tuple[str, str]] = []
+    for todo in todos:
+        if not isinstance(todo, dict):
+            continue
+        content = str(todo.get("content") or "").strip()
+        status = str(todo.get("status") or "").strip()
+        signature.append((content, status))
+    return tuple(signature)
+
+
+def _last_tool_call_signature(messages: Any) -> tuple[str, str] | None:
+    """Возвращает сигнатуру последнего AI tool call."""
+
+    if not isinstance(messages, list):
+        return None
+    for message in reversed(messages):
+        if not isinstance(message, AIMessage):
+            continue
+        tool_calls = getattr(message, "tool_calls", None) or []
+        if not tool_calls:
+            continue
+        last_call = tool_calls[-1]
+        name = str(last_call.get("name") or "")
+        args = str(last_call.get("args") or "")
+        return (name, args)
+    return None
+
+
+def _last_tool_message_signature(messages: Any) -> tuple[str, str, str] | None:
+    """Возвращает сигнатуру последнего ToolMessage."""
+
+    if not isinstance(messages, list):
+        return None
+    for message in reversed(messages):
+        if type(message).__name__ != "ToolMessage":
+            continue
+        name = str(getattr(message, "name", "") or "")
+        tool_call_id = str(getattr(message, "tool_call_id", "") or "")
+        content = message_to_text(message).strip()[:400]
+        return (name, tool_call_id, content)
+    return None
 
 
 def print_loaded_skills_once(result: Any, *, already_printed: bool) -> bool:
@@ -468,6 +662,43 @@ def print_turn_result(result: Any) -> None:
         print()
 
 
+def resolve_agent_state(agent: Any, config: dict[str, Any], result: Any) -> Any:
+    """Возвращает полный checkpoint-state после ``invoke`` или ``resume``.
+
+    Args:
+        agent: Скомпилированный LangGraph/DeepAgents graph.
+        config: Config LangGraph с thread_id.
+        result: Сырой результат ``agent.invoke`` или ``agent.resume``.
+
+    Returns:
+        Полный state из ``agent.get_state(config).values``. Если текущий результат
+        является interrupt payload или state получить не удалось, возвращается
+        исходный ``result``.
+    """
+
+    if extract_interrupt_values(result):
+        return result
+
+    get_state = getattr(agent, "get_state", None)
+    if get_state is None:
+        return result
+
+    try:
+        snapshot = get_state(config)
+    except Exception as error:
+        LOGGER.debug("Не удалось получить checkpoint-state агента: %s.", error)
+        return result
+
+    values = getattr(snapshot, "values", None)
+    if isinstance(values, dict):
+        return values
+    if isinstance(snapshot, dict):
+        snapshot_values = snapshot.get("values")
+        if isinstance(snapshot_values, dict):
+            return snapshot_values
+    return result
+
+
 def extract_interrupt_values(result: Any) -> list[Any]:
     """Извлекает значения interrupt из результата LangGraph.
 
@@ -509,22 +740,26 @@ def last_agent_response_text(result: Any) -> str:
     messages = result.get("messages") or []
     if not messages:
         return ""
-    message = messages[-1]
-    if getattr(message, "tool_calls", None):
-        return ""
-    if type(message).__name__ != "AIMessage":
-        return ""
-    return message_to_text(message).strip()
+    for message in reversed(messages):
+        if not isinstance(message, AIMessage):
+            return ""
+        if getattr(message, "tool_calls", None):
+            return ""
+        text = message_to_text(message).strip()
+        if text:
+            return text
+    return ""
 
 
-def last_message_has_tool_calls(result: Any) -> bool:
-    """Проверяет, содержит ли последнее сообщение tool calls.
+def has_pending_tool_calls(result: Any) -> bool:
+    """Проверяет, есть ли незавершенный tool call в последнем tool-вызове модели.
 
     Args:
         result: Результат ``agent.invoke`` или ``resume``.
 
     Returns:
-        ``True``, если последнее сообщение содержит tool calls.
+        ``True``, если последний AIMessage с tool calls не имеет всех
+        соответствующих ToolMessage-ответов в последующих сообщениях.
     """
 
     if not isinstance(result, dict):
@@ -532,7 +767,39 @@ def last_message_has_tool_calls(result: Any) -> bool:
     messages = result.get("messages") or []
     if not messages:
         return False
-    return bool(getattr(messages[-1], "tool_calls", None))
+
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, AIMessage):
+            continue
+        tool_calls = getattr(message, "tool_calls", None)
+        if not tool_calls:
+            return False
+
+        answered_tool_call_ids = {
+            str(tool_call_id)
+            for tool_call_id in (
+                getattr(following_message, "tool_call_id", None)
+                for following_message in messages[index + 1 :]
+            )
+            if tool_call_id
+        }
+        requested_tool_call_ids = [str(tool_call.get("id")) for tool_call in tool_calls if tool_call.get("id")]
+        return any(tool_call_id not in answered_tool_call_ids for tool_call_id in requested_tool_call_ids)
+    return False
+
+
+def last_message_has_tool_calls(result: Any) -> bool:
+    """Проверяет наличие незавершенных tool calls для обратной совместимости.
+
+    Args:
+        result: Результат ``agent.invoke`` или ``resume``.
+
+    Returns:
+        ``True``, если есть pending tool call.
+    """
+
+    return has_pending_tool_calls(result)
 
 
 def has_unfinished_todos(result: Any) -> bool:
@@ -673,6 +940,27 @@ def message_to_text(message: Any) -> str:
     if content is not None:
         return str(content)
     return str(message)
+
+
+def iter_tool_calls(messages: Iterable[Any]) -> Iterable[tuple[str, Any]]:
+    """Итерирует tool calls из AIMessage в порядке появления."""
+
+    for message in messages:
+        if not isinstance(message, AIMessage):
+            continue
+        for tool_call in getattr(message, "tool_calls", None) or []:
+            yield str(tool_call.get("name") or ""), tool_call.get("args")
+
+
+def iter_tool_results(messages: Iterable[Any]) -> Iterable[tuple[str, str]]:
+    """Итерирует tool results из ToolMessage в порядке появления."""
+
+    for message in messages:
+        if type(message).__name__ != "ToolMessage":
+            continue
+        tool_name = str(getattr(message, "name", "") or "")
+        tool_content = message_to_text(message).strip()
+        yield tool_name, tool_content
 
 
 def main() -> int:

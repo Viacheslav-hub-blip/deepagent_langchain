@@ -36,6 +36,7 @@ class AnalyticsPlanState(AgentState):
         preloaded_skill_paths: Список skill-файлов, которые были прочитаны при
             подготовке domain context.
         preloaded_skills_context: Компактное содержимое прочитанных skill-файлов.
+        preloaded_skills_selection_user_key: Ключ пользовательского сообщения, по которому выбирались skills.
         few_shot_examples_user_key: Ключ последнего пользовательского запроса, для которого подобраны few-shot примеры.
         few_shot_example_names: Названия few-shot примеров, выбранных для текущего запроса.
         few_shot_examples: Полный markdown-текст выбранных few-shot примеров для system prompt.
@@ -48,6 +49,7 @@ class AnalyticsPlanState(AgentState):
     skills_context_loaded: NotRequired[bool]
     preloaded_skill_paths: NotRequired[list[str]]
     preloaded_skills_context: NotRequired[str]
+    preloaded_skills_selection_user_key: NotRequired[str]
     few_shot_examples_user_key: NotRequired[str]
     few_shot_example_names: NotRequired[list[str]]
     few_shot_examples: NotRequired[str]

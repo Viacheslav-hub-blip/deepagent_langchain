@@ -7,6 +7,8 @@
 - ToolTraceLoggingMiddleware.wrap_tool_call: логирование sync tool call.
 - ToolTraceLoggingMiddleware.awrap_tool_call: логирование async tool call.
 - _agent_name: извлечение имени агента из runtime metadata.
+- _strip_service_state_from_task_command: очистка служебных state-полей из результата task.
+- _serialize_tool_result: структурированное представление результата tool call.
 - _format_json: компактное JSON-представление значения.
 - _format_tool_result: компактное описание результата tool call.
 - _print_tool_call: вывод фактического вызова tool в консоль.
@@ -30,10 +32,26 @@ from langgraph.types import Command
 
 from deep_agent_test.agent_logging import DeepAgentEventLogger
 
+TASK_TOOL_NAME = "task"
+RESPONSE_FORMAT_TOOL_NAMES = {"DataRetrievalResponse", "PythonAnalysisResponse"}
+SERVICE_STATE_KEYS_FROM_TASK = {
+    "approved_plan_user_key",
+    "few_shot_example_names",
+    "few_shot_examples",
+    "few_shot_examples_user_key",
+    "memory_contents",
+    "preloaded_skill_paths",
+    "preloaded_skills_context",
+    "preloaded_skills_selection_user_key",
+    "skills_context_loaded",
+    "skills_load_errors",
+    "skills_metadata",
+}
+
 
 @dataclass(frozen=True)
 class ToolTraceLoggingMiddleware(AgentMiddleware):
-    """Пишет трассировку tools в файлы логов и при необходимости выводит tool calls в консоль.
+    """Пишет трассировку tools и очищает служебный state из результата ``task``.
 
     Args:
         event_logger: Файловый логгер DeepAgent.
@@ -46,7 +64,8 @@ class ToolTraceLoggingMiddleware(AgentMiddleware):
         print_tool_results: Нужно ли печатать ответы tools в консоль.
 
     Returns:
-        Middleware LangChain, которое не меняет поведение агента и пишет JSONL-логи.
+        Middleware LangChain, которое пишет JSONL-логи и не передает supervisor-у
+        большие служебные state-поля subagent-а из результата ``task``.
     """
 
     event_logger: DeepAgentEventLogger
@@ -117,6 +136,14 @@ class ToolTraceLoggingMiddleware(AgentMiddleware):
                 "calls": calls,
             },
         )
+        if self.print_tool_calls:
+            for call in calls:
+                if call.get("name") in RESPONSE_FORMAT_TOOL_NAMES:
+                    _print_model_tool_call(
+                        agent=_agent_name(runtime),
+                        tool_name=str(call.get("name")),
+                        args_preview=_format_json(call.get("args", {}), self.preview_chars),
+                    )
         return None
 
     def wrap_tool_call(
@@ -150,6 +177,8 @@ class ToolTraceLoggingMiddleware(AgentMiddleware):
         if self.print_tool_calls:
             _print_tool_call(agent=agent_name, tool_name=tool_name, args_preview=args_preview)
         result = handler(request)
+        result = _strip_service_state_from_task_command(result, tool_name=tool_name)
+        result_payload = _serialize_tool_result(result)
         result_preview = _format_tool_result(result, self.preview_chars)
         if self.log_tool_result:
             self.event_logger.log_tool_event(
@@ -158,6 +187,18 @@ class ToolTraceLoggingMiddleware(AgentMiddleware):
                     "agent": agent_name,
                     "tool_name": tool_name,
                     "tool_call_id": request.tool_call.get("id"),
+                    "result_preview": result_preview,
+                },
+            )
+            self.event_logger.log_tool_event(
+                "tool_io",
+                {
+                    "agent": agent_name,
+                    "tool_name": tool_name,
+                    "tool_call_id": request.tool_call.get("id"),
+                    "args": request.tool_call.get("args", {}),
+                    "args_preview": args_preview,
+                    "result": result_payload,
                     "result_preview": result_preview,
                 },
             )
@@ -196,6 +237,8 @@ class ToolTraceLoggingMiddleware(AgentMiddleware):
         if self.print_tool_calls:
             _print_tool_call(agent=agent_name, tool_name=tool_name, args_preview=args_preview)
         result = await handler(request)
+        result = _strip_service_state_from_task_command(result, tool_name=tool_name)
+        result_payload = _serialize_tool_result(result)
         result_preview = _format_tool_result(result, self.preview_chars)
         if self.log_tool_result:
             self.event_logger.log_tool_event(
@@ -204,6 +247,18 @@ class ToolTraceLoggingMiddleware(AgentMiddleware):
                     "agent": agent_name,
                     "tool_name": tool_name,
                     "tool_call_id": request.tool_call.get("id"),
+                    "result_preview": result_preview,
+                },
+            )
+            self.event_logger.log_tool_event(
+                "tool_io",
+                {
+                    "agent": agent_name,
+                    "tool_name": tool_name,
+                    "tool_call_id": request.tool_call.get("id"),
+                    "args": request.tool_call.get("args", {}),
+                    "args_preview": args_preview,
+                    "result": result_payload,
                     "result_preview": result_preview,
                 },
             )
@@ -225,6 +280,120 @@ def _agent_name(runtime: Any) -> str:
     config = getattr(runtime, "config", {}) or {}
     metadata = config.get("metadata", {})
     return str(metadata.get("lc_agent_name") or "main")
+
+
+def _strip_service_state_from_task_command(value: ToolMessage | Command[Any], *, tool_name: str) -> ToolMessage | Command[Any]:
+    """Удаляет служебные state-поля subagent-а из результата ``task``.
+
+    Args:
+        value: Результат tool call, который может быть ``ToolMessage`` или ``Command``.
+        tool_name: Имя выполненного инструмента.
+
+    Returns:
+        Исходный результат или новый ``Command`` с очищенным ``update``.
+    """
+
+    if tool_name != TASK_TOOL_NAME or not isinstance(value, Command):
+        return value
+    update = value.update
+    if not isinstance(update, dict):
+        return value
+
+    cleaned_update = {key: item for key, item in update.items() if key not in SERVICE_STATE_KEYS_FROM_TASK}
+    if len(cleaned_update) == len(update):
+        return value
+    return Command(
+        graph=value.graph,
+        update=cleaned_update,
+        resume=value.resume,
+        goto=value.goto,
+    )
+
+
+def _serialize_tool_result(value: Any) -> dict[str, Any]:
+    """Преобразует результат tool call в структуру для JSONL-трассировки.
+
+    Args:
+        value: Результат tool call, например ``ToolMessage`` или ``Command``.
+
+    Returns:
+        Словарь с типом результата и основными данными, пригодными для JSONL.
+    """
+
+    payload: dict[str, Any] = {"type": type(value).__name__}
+    if isinstance(value, ToolMessage):
+        payload.update(
+            {
+                "content": value.content,
+                "name": value.name,
+                "tool_call_id": value.tool_call_id,
+                "status": getattr(value, "status", None),
+            }
+        )
+        artifact = getattr(value, "artifact", None)
+        if artifact is not None:
+            payload["artifact"] = artifact
+        return payload
+
+    if isinstance(value, Command):
+        payload.update(
+            {
+                "graph": value.graph,
+                "goto": value.goto,
+                "resume": value.resume,
+                "update": _serialize_command_update(value.update),
+            }
+        )
+        return payload
+
+    payload["value"] = value
+    return payload
+
+
+def _serialize_command_update(update: Any) -> Any:
+    """Сериализует update из ``Command`` без тяжелых служебных полей.
+
+    Args:
+        update: Значение ``Command.update``.
+
+    Returns:
+        JSON-совместимое представление update.
+    """
+
+    if not isinstance(update, dict):
+        return update
+
+    serialized: dict[str, Any] = {}
+    for key, item in update.items():
+        if key in SERVICE_STATE_KEYS_FROM_TASK:
+            continue
+        if key == "messages" and isinstance(item, list):
+            serialized[key] = [_serialize_message(message) for message in item]
+        else:
+            serialized[key] = item
+    return serialized
+
+
+def _serialize_message(message: Any) -> dict[str, Any]:
+    """Преобразует сообщение LangChain в компактный словарь для лога.
+
+    Args:
+        message: Сообщение из state update.
+
+    Returns:
+        Словарь с типом, содержимым и служебными идентификаторами сообщения.
+    """
+
+    payload = {
+        "type": type(message).__name__,
+        "content": getattr(message, "content", None),
+        "name": getattr(message, "name", None),
+        "tool_call_id": getattr(message, "tool_call_id", None),
+    }
+    tool_calls = getattr(message, "tool_calls", None)
+    if tool_calls:
+        payload["tool_calls"] = tool_calls
+    return payload
 
 
 def _format_json(value: Any, max_chars: int) -> str:
@@ -297,6 +466,25 @@ def _print_tool_result(*, agent: str, tool_name: str, result_preview: str) -> No
     print("Агент:")
     print(f"Ответ инструмента `{tool_name}` ({agent}):")
     print(result_preview)
+    print()
+
+
+def _print_model_tool_call(*, agent: str, tool_name: str, args_preview: str) -> None:
+    """Печатает tool call из ответа модели, который не исполняется ToolNode.
+
+    Args:
+        agent: Имя агента, который запросил structured output.
+        tool_name: Имя response-format tool.
+        args_preview: Краткое JSON-представление аргументов.
+
+    Returns:
+        None.
+    """
+
+    print()
+    print("Агент:")
+    print(f"Вызов structured output `{tool_name}` ({agent}):")
+    print(args_preview)
     print()
 
 

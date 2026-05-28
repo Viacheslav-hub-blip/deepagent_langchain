@@ -16,7 +16,7 @@ from langchain_gigachat import GigaChat
 model = ChatOpenAI(
     base_url="https://openrouter.ai/api/v1",
     # api_key="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",
-    api_key="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",
+    api_key="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",
     # model="deepseek/deepseek-v4-pro",
     # model="nvidia/nemotron-3-super-120b-a12b",
     # model="qwen/qwen3.5-397b-a17b",
@@ -36,7 +36,7 @@ embeddings = OpenAIEmbeddings(
     base_url="https://openrouter.ai/api/v1",
 
     # 2. Передаем ключ OpenRouter
-    api_key="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",
+    api_key="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",
 
     # 3. Указываем модель (OpenRouter требует указывать провайдера, например 'openai/')
     model="openai/text-embedding-3-small",
