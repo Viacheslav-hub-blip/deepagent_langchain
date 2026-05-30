@@ -19,7 +19,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -54,11 +54,22 @@ class SelectedSkillPaths(BaseModel):
 class PreloadedSkillsContextMiddleware(AgentMiddleware[AnalyticsAgentState]):
     """Автоматически загружает файлы ``SKILL.md`` до первого рассуждения модели.
 
+    Используется в двух режимах, которые делят один кэш через ``shared_selection``:
+
+    - ``select_skills=True`` (supervisor): выбирает релевантные skills через LLM один раз
+      на пользовательский запрос и кладёт результат в общий кэш.
+    - ``select_skills=False`` (subagent): не вызывает LLM, а переиспользует выбор
+      supervisor-а из общего кэша, чтобы в субагентов попадали те же skills.
+
     Args:
         skills_root: Локальная папка проекта, которую нужно рекурсивно просканировать.
         skills_virtual_dir: Виртуальная папка skills внутри DeepAgents backend.
         max_chars_per_file: Максимальная длина текста одного ``SKILL.md`` в context.
         model: Chat model для выбора релевантных skills по index. Если ``None``, загружаются все skills.
+        select_skills: Режим выбора. ``True`` — выбирать и кэшировать (supervisor),
+            ``False`` — только переиспользовать кэш supervisor-а (subagent).
+        shared_selection: Общий мутируемый кэш выбора skills. Один и тот же словарь нужно
+            передать supervisor- и subagent-экземплярам, чтобы они делили выбор.
 
     Returns:
         Middleware, который добавляет compact domain context в state и system message.
@@ -66,8 +77,10 @@ class PreloadedSkillsContextMiddleware(AgentMiddleware[AnalyticsAgentState]):
 
     skills_root: Path
     skills_virtual_dir: str = "/skills/"
-    max_chars_per_file: int = 6000
+    max_chars_per_file: int = 18000
     model: Any | None = None
+    select_skills: bool = True
+    shared_selection: dict[str, Any] = field(default_factory=dict, compare=False)
 
     state_schema = AnalyticsAgentState
 
@@ -90,6 +103,43 @@ class PreloadedSkillsContextMiddleware(AgentMiddleware[AnalyticsAgentState]):
         if state.get("skills_context_loaded") and state.get("preloaded_skills_selection_user_key") == user_query:
             return None
 
+        selection = self._resolve_selection(user_query)
+        if selection is None:
+            return None
+
+        context, loaded_paths, skills_index = selection
+        return {
+            "skills_context_loaded": True,
+            "preloaded_skills_selection_user_key": user_query,
+            "preloaded_skill_paths": loaded_paths,
+            "preloaded_skills_context": context,
+            "preloaded_skills_index": skills_index,
+        }
+
+    def _resolve_selection(
+        self,
+        user_query: str,
+    ) -> tuple[str, list[str], list[dict[str, str]]] | None:
+        """Возвращает выбор skills из кэша или вычисляет его (только для supervisor).
+
+        Args:
+            user_query: Последний пользовательский запрос текущего агента.
+
+        Returns:
+            Кортеж ``(context, loaded_paths, skills_index)`` или ``None``, если выбор
+            недоступен (субагент без кэша supervisor-а).
+        """
+
+        cached = self.shared_selection.get("entry")
+
+        if not self.select_skills:
+            if cached is None:
+                return None
+            return cached["context"], cached["paths"], cached["index"]
+
+        if cached is not None and cached.get("user_query") == user_query:
+            return cached["context"], cached["paths"], cached["index"]
+
         context, loaded_paths = build_preloaded_skills_context(
             skills_root=self.skills_root,
             skills_virtual_dir=self.skills_virtual_dir,
@@ -102,13 +152,13 @@ class PreloadedSkillsContextMiddleware(AgentMiddleware[AnalyticsAgentState]):
             skills_root=self.skills_root,
             skills_virtual_dir=self.skills_virtual_dir,
         )
-        return {
-            "skills_context_loaded": True,
-            "preloaded_skills_selection_user_key": user_query,
-            "preloaded_skill_paths": loaded_paths,
-            "preloaded_skills_context": context,
-            "preloaded_skills_index": skills_index,
+        self.shared_selection["entry"] = {
+            "user_query": user_query,
+            "context": context,
+            "paths": loaded_paths,
+            "index": skills_index,
         }
+        return context, loaded_paths, skills_index
 
     def wrap_model_call(
         self,
@@ -225,11 +275,10 @@ def select_relevant_skill_paths_with_llm(
             [
                 SystemMessage(
                     content=(
-                        "Ты выбираешь domain skills для предварительного preview middleware. "
-                        "Используй только пути из переданного index. "
+                        "Ты выбираешь domain skills для предварительной загрузки по запросу "
+                        "пользователя. Используй только пути из переданного index. "
                         "Для многошаговых запросов выбирай все skills, которые могут понадобиться "
-                        "на разных этапах: hit-table, cards-event-table, uko-event-table, "
-                        "field-descriptions и профильные skills по типу задачи. "
+                        "на разных этапах, а не только один наиболее похожий. "
                         "Лучше включить лишний релевантный skill, чем пропустить нужный downstream-источник."
                     )
                 ),

@@ -37,7 +37,7 @@ class SupervisorPromptContextTests(unittest.TestCase):
         self.assertIn("cards-event-table", names)
         self.assertIn("uko-event-table", names)
 
-    def test_planning_prompt_blocks_put_index_before_partial_preview(self) -> None:
+    def test_planning_prompt_blocks_put_index_before_preloaded(self) -> None:
         index_block = prompts.SKILLS_INDEX_CONTEXT_PROMPT_TEMPLATE.format(
             skills_index=json.dumps(
                 [{"path": "/skills/hit-table/SKILL.md", "name": "hit-table", "description": "hits"}],
@@ -47,12 +47,19 @@ class SupervisorPromptContextTests(unittest.TestCase):
         preview_block = prompts.PRELOADED_SKILLS_CONTEXT_PROMPT_TEMPLATE.format(context="preview text")
         combined = f"{prompts.SYSTEM_PROMPT}\n\n{index_block}\n\n{preview_block}"
 
-        self.assertIn("Skills Index", combined)
-        self.assertIn("Partial Preloaded Skills Preview", combined)
-        self.assertLess(combined.index("Skills Index"), combined.index("Partial Preloaded Skills Preview"))
+        self.assertIn("## Skills Index", combined)
+        self.assertIn("## Preloaded Skills", combined)
+        self.assertLess(combined.index("## Skills Index"), combined.index("## Preloaded Skills"))
         self.assertIn("read_file", combined)
         self.assertIn("write_todos", combined)
-        self.assertIn("Skills Before Planning Policy", combined)
+        self.assertIn("load_skills", combined)
+
+    def test_system_prompt_has_no_domain_business_logic(self) -> None:
+        """SYSTEM_PROMPT не должен содержать доменные имена таблиц/полей."""
+
+        lowered = prompts.SYSTEM_PROMPT.lower()
+        for token in ("event_dt", "event_time", "uko_event", "cards_event", "epk_id", "event_dttm_readable"):
+            self.assertNotIn(token, lowered)
 
 
 if __name__ == "__main__":

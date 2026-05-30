@@ -14,7 +14,6 @@ from deep_agent_test.run_native_analytics_chat import (
     last_agent_response_text,
     print_loaded_skills_once,
     print_messages,
-    print_stream_update,
 )
 
 
@@ -87,17 +86,6 @@ class NativeAnalyticsChatRunnerTests(unittest.TestCase):
         cursor = print_messages(state, start_index=0)
         self.assertEqual(cursor, 3)
         self.assertEqual(print_messages(state, start_index=cursor), cursor)
-
-    def test_print_stream_update_tool_call(self) -> None:
-        update = {
-            "messages": [
-                AIMessage(
-                    content="",
-                    tool_calls=[{"name": "read_file", "args": {"file_path": "/skills/hit-table/SKILL.md"}, "id": "1"}],
-                )
-            ]
-        }
-        print_stream_update("model", update)
 
 
 if __name__ == "__main__":

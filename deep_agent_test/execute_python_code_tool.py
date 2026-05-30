@@ -107,6 +107,8 @@ result = df
 
 
 class ExecutePythonCodeInput(BaseModel):
+    """Аргументы tool ``execute_python_code``: код, имя переменной результата, описание."""
+
     code: str = Field(
         description=(
             "Python-код для выполнения. Используй helpers `read_pickle_file`, "
@@ -127,6 +129,19 @@ class ExecutePythonCodeInput(BaseModel):
 
 
 class ExecutePythonCodeTool(BaseTool):
+    """LangChain tool выполнения Python-кода в persistent sandbox DeepAgent.
+
+    Перед выполнением код проходит статическую проверку политики (`_validate_code_policy`):
+    разрешён только белый список импортов и запрещены опасные вызовы (eval/exec/os.system,
+    удаление файлов и т.п.). Само выполнение и формирование информативного результата
+    делегируются переиспользуемому ``_execute_python_code`` из ``planner_agent``.
+
+    Любой результат возвращается строкой JSON. При ошибке JSON содержит ``error``,
+    полный ``traceback``, ``possible_causes``, ``solution_options``, ``retry_guidance``,
+    ``available_variables`` и список ``sandbox_helpers`` — этого достаточно, чтобы модель
+    исправила код и повторила вызов.
+    """
+
     name: str = EXECUTE_PYTHON_CODE_TOOL_NAME
     description: str = EXECUTE_PYTHON_CODE_DESCRIPTION
     args_schema: type[BaseModel] = ExecutePythonCodeInput
@@ -134,6 +149,12 @@ class ExecutePythonCodeTool(BaseTool):
     _sandbox: DeepAgentPythonSandbox = PrivateAttr()
 
     def __init__(self, *, sandbox: DeepAgentPythonSandbox) -> None:
+        """Создаёт tool поверх готового persistent sandbox.
+
+        Args:
+            sandbox: Песочница с общими переменными между вызовами в одной сессии.
+        """
+
         super().__init__()
         self._sandbox = sandbox
 
@@ -144,6 +165,18 @@ class ExecutePythonCodeTool(BaseTool):
         description: str = "",
         **_: Any,
     ) -> str:
+        """Синхронно проверяет политику, выполняет код и сериализует результат.
+
+        Args:
+            code: Python-код для выполнения.
+            target_variable: Имя переменной результата или ``None`` для print-вывода.
+            description: Краткая цель кода для трассировки.
+            **_: Служебные аргументы LangChain, не используются.
+
+        Returns:
+            JSON-строка с результатом или с подробным описанием ошибки.
+        """
+
         generated_code = _normalize_code_text(str(code or ""))
         try:
             _validate_code_policy(generated_code)
@@ -171,6 +204,18 @@ class ExecutePythonCodeTool(BaseTool):
         description: str = "",
         **_: Any,
     ) -> str:
+        """Асинхронная обёртка над :meth:`_run` (выполнение синхронное).
+
+        Args:
+            code: Python-код для выполнения.
+            target_variable: Имя переменной результата или ``None``.
+            description: Краткая цель кода.
+            **_: Служебные аргументы LangChain, не используются.
+
+        Returns:
+            JSON-строка с результатом или ошибкой.
+        """
+
         return self._run(
             code=code,
             target_variable=target_variable,
@@ -179,10 +224,32 @@ class ExecutePythonCodeTool(BaseTool):
 
 
 def build_execute_python_code_tool(sandbox: DeepAgentPythonSandbox) -> ExecutePythonCodeTool:
+    """Фабрика tool ``execute_python_code`` для supervisor.
+
+    Args:
+        sandbox: Persistent sandbox с helpers чтения pickle и аналитическими библиотеками.
+
+    Returns:
+        Готовый ``ExecutePythonCodeTool`` для регистрации в списке tools.
+    """
+
     return ExecutePythonCodeTool(sandbox=sandbox)
 
 
 def _validate_code_policy(code: str) -> None:
+    """Статически проверяет код перед выполнением.
+
+    Разбирает AST и запрещает: пустой/слишком длинный код, импорт вне
+    ``ALLOWED_IMPORT_ROOTS``, вызовы из ``DENIED_CALL_NAMES`` и
+    ``DENIED_ATTRIBUTE_CALLS``, а также удаление файлов через ``Path.unlink/rmdir``.
+
+    Args:
+        code: Python-код, который нужно проверить.
+
+    Raises:
+        ValueError: Код пустой, слишком длинный или содержит запрещённый импорт/вызов.
+        SyntaxError: Код не разбирается ``ast.parse``.
+    """
     if not str(code or "").strip():
         raise ValueError("code is required")
     if len(code) > MAX_CODE_CHARS:
@@ -211,12 +278,16 @@ def _validate_code_policy(code: str) -> None:
 
 
 def _call_name(func: ast.AST) -> str:
+    """Возвращает имя прямого вызова функции или пустую строку."""
+
     if isinstance(func, ast.Name):
         return func.id
     return ""
 
 
 def _attribute_call_name(func: ast.AST) -> tuple[str, str]:
+    """Возвращает пару ``(owner, attr)`` для вызова метода атрибута."""
+
     if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
         return func.value.id, func.attr
     return "", ""
@@ -229,6 +300,18 @@ def _policy_error_payload(
     *,
     sandbox: DeepAgentPythonSandbox,
 ) -> str:
+    """Формирует информативный JSON-ответ при провале статической проверки кода.
+
+    Args:
+        generated_code: Нормализованный код, который не прошёл проверку.
+        target_variable: Запрошенное имя переменной результата или ``None``.
+        exc: Исключение валидации политики.
+        sandbox: Sandbox для перечисления доступных переменных и путей.
+
+    Returns:
+        JSON-строка с ``error``, ``traceback``, причинами и вариантами исправления.
+    """
+
     from planner_agent.tools.execute_python_code_tool import _visible_variable_names
 
     payload = {
@@ -253,6 +336,16 @@ def _policy_error_payload(
 
 
 def _result_to_json(result: PythonExecutionResult, *, sandbox: DeepAgentPythonSandbox) -> str:
+    """Дополняет результат выполнения контекстом sandbox и сериализует в JSON.
+
+    Args:
+        result: Результат ``_execute_python_code`` (успех или ошибка выполнения).
+        sandbox: Sandbox для добавления helpers и разрешённых путей в ответ.
+
+    Returns:
+        JSON-строка; при неуспехе ``message`` подсказывает прочитать traceback и повторить.
+    """
+
     payload = json.loads(result.to_json())
     payload["sandbox_helpers"] = sorted(SANDBOX_HELPER_NAMES)
     payload["working_directory"] = str(sandbox.working_directory)

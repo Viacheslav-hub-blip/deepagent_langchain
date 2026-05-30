@@ -23,6 +23,14 @@ REQUIRED_CONFIG_KEYS = (
     "tool_output_min_content_chars_to_save",
     "tool_output_preview_rows",
     "tool_output_inline_original_chars",
+    "context_edit_trigger_tokens",
+    "context_edit_keep_tool_results",
+    "file_search_use_ripgrep",
+    "max_consecutive_tool_calls",
+    "max_subagent_model_calls",
+    "max_critic_iterations",
+    "graph_recursion_limit",
+    "trace_log_dir",
 )
 
 
@@ -41,9 +49,31 @@ class DeepAgentSettings:
     tool_output_min_content_chars_to_save: int
     tool_output_preview_rows: int
     tool_output_inline_original_chars: int
+    context_edit_trigger_tokens: int
+    context_edit_keep_tool_results: int
+    file_search_use_ripgrep: bool
+    max_consecutive_tool_calls: int
+    max_subagent_model_calls: int
+    max_critic_iterations: int
+    graph_recursion_limit: int
+    trace_log_dir: Path
+    enable_retrieval_critic: bool = True
 
     @classmethod
     def from_mapping(cls, payload: dict[str, Any], project_root: Path = PROJECT_ROOT) -> "DeepAgentSettings":
+        """Собирает типизированные настройки из словаря конфигурации.
+
+        Args:
+            payload: Сырой словарь из JSON-конфига (defaults + override).
+            project_root: Корень проекта для разрешения относительных путей.
+
+        Returns:
+            Готовый ``DeepAgentSettings``.
+
+        Raises:
+            ValueError: Не хватает обязательного ключа или ключ имеет неверный тип.
+        """
+
         _validate_required_config_keys(payload)
         return cls(
             thread_id=str(payload["thread_id"]),
@@ -60,15 +90,32 @@ class DeepAgentSettings:
             ),
             tool_output_preview_rows=_int_from_config(payload, "tool_output_preview_rows"),
             tool_output_inline_original_chars=_int_from_config(payload, "tool_output_inline_original_chars"),
+            context_edit_trigger_tokens=_int_from_config(payload, "context_edit_trigger_tokens"),
+            context_edit_keep_tool_results=_int_from_config(payload, "context_edit_keep_tool_results"),
+            file_search_use_ripgrep=_bool_from_config(payload, "file_search_use_ripgrep"),
+            max_consecutive_tool_calls=_int_from_config(payload, "max_consecutive_tool_calls"),
+            max_subagent_model_calls=_int_from_config(payload, "max_subagent_model_calls"),
+            max_critic_iterations=_int_from_config(payload, "max_critic_iterations"),
+            graph_recursion_limit=_int_from_config(payload, "graph_recursion_limit"),
+            trace_log_dir=_resolve_project_path(payload["trace_log_dir"], project_root),
+            enable_retrieval_critic=(
+                _bool_from_config(payload, "enable_retrieval_critic")
+                if "enable_retrieval_critic" in payload
+                else True
+            ),
         )
 
 
 def load_deep_agent_settings(config_path: str | Path | None = None) -> DeepAgentSettings:
+    """Загружает настройки агента из JSON-конфига (defaults + опциональный override)."""
+
     payload = _load_config_payload(config_path)
     return DeepAgentSettings.from_mapping(payload)
 
 
 def _load_config_payload(config_path: str | Path | None = None) -> dict[str, Any]:
+    """Читает defaults-конфиг и мёржит поверх него override (аргумент или env)."""
+
     default_payload = _read_json_file(DEFAULT_CONFIG_PATH)
     raw_path = config_path or os.environ.get(CONFIG_ENV_VAR)
     if raw_path is None:
@@ -83,6 +130,8 @@ def _load_config_payload(config_path: str | Path | None = None) -> dict[str, Any
 
 
 def _read_json_file(path: Path) -> dict[str, Any]:
+    """Читает JSON-файл и проверяет, что он содержит объект (dict)."""
+
     resolved_path = path.resolve()
     payload = json.loads(resolved_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -91,12 +140,16 @@ def _read_json_file(path: Path) -> dict[str, Any]:
 
 
 def _validate_required_config_keys(payload: dict[str, Any]) -> None:
+    """Проверяет наличие всех обязательных ключей конфига, иначе бросает ValueError."""
+
     missing_keys = [key for key in REQUIRED_CONFIG_KEYS if key not in payload]
     if missing_keys:
         raise ValueError(f"DeepAgent config missing required keys: {', '.join(missing_keys)}")
 
 
 def _resolve_project_path(value: Any, project_root: Path) -> Path:
+    """Приводит значение к абсолютному пути относительно корня проекта."""
+
     path = Path(str(value))
     if path.is_absolute():
         return path.resolve()
@@ -104,13 +157,32 @@ def _resolve_project_path(value: Any, project_root: Path) -> Path:
 
 
 def _int_from_config(payload: dict[str, Any], key: str) -> int:
+    """Читает int-ключ конфига, иначе бросает ValueError с именем ключа."""
+
     try:
         return int(payload[key])
     except (TypeError, ValueError):
         raise ValueError(f"Config key '{key}' must be an integer.") from None
 
 
+def _bool_from_config(payload: dict[str, Any], key: str) -> bool:
+    """Читает bool-ключ конфига, принимая bool или строковые true/false/1/0/yes/no."""
+
+    value = payload[key]
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no"}:
+            return False
+    raise ValueError(f"Config key '{key}' must be a boolean.")
+
+
 def _dict_from_config(payload: dict[str, Any], key: str) -> dict[str, Any]:
+    """Читает dict-ключ конфига, иначе бросает ValueError с именем ключа."""
+
     value = payload[key]
     if isinstance(value, dict):
         return dict(value)
@@ -118,6 +190,8 @@ def _dict_from_config(payload: dict[str, Any], key: str) -> dict[str, Any]:
 
 
 def _optional_str_from_config(payload: dict[str, Any], key: str) -> str | None:
+    """Читает строковый ключ конфига, допускающий ``null`` (возвращает ``None``)."""
+
     value = payload[key]
     if value is None:
         return None

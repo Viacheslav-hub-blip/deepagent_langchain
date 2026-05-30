@@ -29,6 +29,14 @@ class DeepAgentPythonSandbox:
         readable_roots: tuple[Path, ...],
         tool_outputs_dir: Path,
     ) -> None:
+        """Создаёт sandbox с общим словарём ``globals`` и seed-helpers.
+
+        Args:
+            working_directory: Рабочая директория для относительных путей в коде.
+            readable_roots: Директории, из которых helpers разрешают чтение файлов.
+            tool_outputs_dir: Папка spill-файлов (`.pkl`) после offload middleware.
+        """
+
         self.working_directory = working_directory.resolve()
         self.readable_roots = tuple(path.resolve() for path in readable_roots)
         self.tool_outputs_dir = tool_outputs_dir.resolve()
@@ -38,11 +46,20 @@ class DeepAgentPythonSandbox:
         self._seed_helpers()
 
     def _seed_helpers(self) -> None:
+        """Заполняет ``globals`` helpers чтения pickle и библиотеками pandas/numpy.
+
+        Добавляет ``PROJECT_ROOT``, ``TOOL_OUTPUTS_DIR``, ``read_pickle_file``,
+        ``describe_pickle_file``, ``rows_to_dataframe`` и (если доступны) ``pd``/``np``.
+        Чтение файлов ограничено разрешёнными директориями ``readable_roots``.
+        """
+
         readable_roots = self.readable_roots
         tool_outputs_dir = self.tool_outputs_dir
         project_root = PROJECT_ROOT.resolve()
 
         def _assert_readable_path(path: Path) -> Path:
+            """Проверяет, что путь существует и лежит в разрешённых для чтения корнях."""
+
             resolved = path.expanduser().resolve()
             if not resolved.exists():
                 raise FileNotFoundError(f"Файл не найден: {resolved}")
@@ -108,6 +125,18 @@ class DeepAgentPythonSandbox:
 
 
 def build_python_sandbox(settings: DeepAgentSettings | None = None) -> DeepAgentPythonSandbox:
+    """Собирает persistent sandbox для ``execute_python_code``.
+
+    Рабочая директория и разрешённые для чтения корни — это ``PROJECT_ROOT`` и папка
+    spill-файлов из настроек.
+
+    Args:
+        settings: Настройки агента; если ``None`` — загружаются из JSON-конфига.
+
+    Returns:
+        Готовый ``DeepAgentPythonSandbox`` с seed-helpers.
+    """
+
     from deep_agent_test.settings import load_deep_agent_settings
 
     settings = settings or load_deep_agent_settings()
@@ -120,6 +149,8 @@ def build_python_sandbox(settings: DeepAgentSettings | None = None) -> DeepAgent
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:
+    """Возвращает True, если ``path`` находится внутри ``parent`` (совместимо с <3.9)."""
+
     try:
         path.relative_to(parent)
     except ValueError:

@@ -4,26 +4,32 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import BaseTool
 from langchain_core.tools.structured import StructuredTool
+from langgraph.errors import GraphRecursionError
 
 from deep_agent_test.analytics_deep_agent import build_analytics_deep_agent
 from deep_agent_test.settings import DeepAgentSettings, load_deep_agent_settings
+from deep_agent_test.trace_logging import build_file_trace_handler
 
 EXIT_COMMANDS = {"exit", "quit", "q", "выход", "стоп"}
 TEST_DATA_DIR = Path(__file__).resolve().parent / "data"
 TOOL_ARGS_PREVIEW_CHARS = 2500
 TOOL_RESULT_PREVIEW_CHARS = 3500
 #DEFAULT_DEMO_QUERY = "Какой город по IP у сработки 3486d84b-4eba-4ba4-b044-94764fc9e7a4?"
-DEFAULT_DEMO_QUERY = "найди все сработки связанные с образованием за январь 2026 года"
-
+#DEFAULT_DEMO_QUERY = "найди все сработки связанные с образованием за январь 2026 года"
+DEFAULT_DEMO_QUERY = "создай новый файл для записи skill, назови папку test-skill"
+# DEFAULT_DEMO_QUERY = "средняя сумма транзакции у сработок с правилом 'DENY оплата обучения после смены устройства'"
+# DEFAULT_DEMO_QUERY = "построй распределение сработок по age category в виде графика за январь 2026, сохрани в файл"
+# DEFAULT_DEMO_QUERY = "что делал клиент в день сработки и за день до сработки? id сработки 3486d84b-4eba-4ba4-b044-94764fc9e7a4"
 
 def build_chat_agent(settings: DeepAgentSettings | None = None, data_tools: list[BaseTool] | None = None) -> Any:
+    """Собирает аналитический DeepAgent на модели из корневого ``model.py``."""
+
     from model import model as openrouter_model
 
     return build_analytics_deep_agent(
@@ -34,15 +40,21 @@ def build_chat_agent(settings: DeepAgentSettings | None = None, data_tools: list
 
 
 def build_test_data_tools(data_dir: Path = TEST_DATA_DIR) -> list[BaseTool]:
+    """Собирает demo-инструмент ``read_table`` поверх тестовых CSV из ``data_dir``."""
+
     from examples.fake_spark_tools import build_fake_spark_tools
 
     raw_tool = build_fake_spark_tools(delay_seconds=0.0, data_dir=data_dir)[0]
 
     def read_table_sync(**kwargs: Any) -> Any:
-        return _format_read_table_output(asyncio.run(raw_tool.ainvoke(kwargs)))
+        """Синхронно вызывает базовый tool и нормализует результат."""
+
+        return _normalize_read_table_output(asyncio.run(raw_tool.ainvoke(kwargs)))
 
     async def read_table_async(**kwargs: Any) -> Any:
-        return _format_read_table_output(await raw_tool.ainvoke(kwargs))
+        """Асинхронно вызывает базовый tool и нормализует результат."""
+
+        return _normalize_read_table_output(await raw_tool.ainvoke(kwargs))
 
     return [
         StructuredTool.from_function(
@@ -55,31 +67,29 @@ def build_test_data_tools(data_dir: Path = TEST_DATA_DIR) -> list[BaseTool]:
     ]
 
 
-def _format_read_table_output(value: Any) -> Any:
+def _normalize_read_table_output(value: Any) -> Any:
+    """Возвращает сырой результат read_table как есть (DataFrame со всеми строками).
+
+    Инструмент НЕ должен сам форматировать вывод или считать строки: за код запроса,
+    счётчики (всего в таблице / подошло под фильтры / возвращено) и offload больших
+    результатов отвечает обёртка ``wrap_data_tools_with_query_code``. Поэтому здесь мы
+    отдаём DataFrame целиком, лишь нормализуя идентификаторы к строкам (чтобы не терять
+    точность длинных ключей) и сохраняя ``attrs`` со счётчиками для обёртки.
+    """
+
     if not hasattr(value, "to_dict") or not hasattr(value, "columns"):
         return value
 
-    rows = [
-        {column: _format_read_table_cell(column, item) for column, item in row.items()}
-        for row in value.to_dict(orient="records")
-    ]
-    payload = {
-        "status": "success",
-        "table_name": value.attrs.get("spark_table_name"),
-        "source_file": value.attrs.get("spark_source_file"),
-        "total_rows": value.attrs.get("spark_total_rows"),
-        "matched_rows": value.attrs.get("spark_matched_rows", len(rows)),
-        "returned_rows": len(rows),
-        "columns": list(value.columns),
-        "rows": rows,
-    }
-    schema = value.attrs.get("spark_schema")
-    if schema is not None:
-        payload["schema"] = schema
-    return json.dumps(payload, ensure_ascii=False, default=str)
+    attrs = dict(getattr(value, "attrs", {}) or {})
+    for column in value.columns:
+        value[column] = [_format_read_table_cell(column, item) for item in value[column].tolist()]
+    value.attrs = attrs
+    return value
 
 
 def _format_read_table_cell(column: str, value: Any) -> Any:
+    """Нормализует ячейку: идентификаторы — в строку, скаляры numpy — в Python-типы."""
+
     if value is None or value != value:
         return None
     normalized_column = column.lower()
@@ -94,14 +104,33 @@ def _format_read_table_cell(column: str, value: Any) -> Any:
     return value
 
 
-def make_config(thread_id: str) -> dict[str, dict[str, str]]:
-    return {"configurable": {"thread_id": thread_id}}
+def make_config(
+    thread_id: str,
+    callbacks: list[Any] | None = None,
+    recursion_limit: int | None = None,
+) -> dict[str, Any]:
+    """Собирает config для ``invoke``: thread_id, callbacks и recursion_limit."""
+
+    config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+    if callbacks:
+        config["callbacks"] = callbacks
+    if recursion_limit is not None:
+        config["recursion_limit"] = recursion_limit
+    return config
 
 
 def run_chat(settings: DeepAgentSettings | None = None, data_tools: list[BaseTool] | None = None) -> None:
+    """Запускает интерактивный терминальный чат с агентом до команды выхода."""
+
     settings = settings or load_deep_agent_settings()
     agent = build_chat_agent(settings=settings, data_tools=data_tools)
-    config = make_config(settings.thread_id)
+    trace_handler = build_file_trace_handler(settings.trace_log_dir, label="chat")
+    config = make_config(
+        settings.thread_id,
+        callbacks=[trace_handler],
+        recursion_limit=settings.graph_recursion_limit,
+    )
+    print(f"Лог хода агента пишется в: {trace_handler.file_path}")
     loaded_skills_printed = False
     message_cursor = _initial_message_cursor(agent, config)
 
@@ -128,67 +157,26 @@ def run_chat(settings: DeepAgentSettings | None = None, data_tools: list[BaseToo
 
 
 def invoke_user_message(agent: Any, config: dict[str, Any], message: str) -> Any:
-    return agent.invoke({"messages": [{"role": "user", "content": message}]}, config=config)
+    """Вызывает агента на сообщении; при исчерпании бюджета графа отдаёт частичный прогресс."""
 
-
-def stream_user_message(agent: Any, config: dict[str, Any], message: str) -> Any:
-    """Запускает agent.stream(stream_mode='updates') и печатает шаги по мере выполнения."""
-
-    for chunk in agent.stream(
-        {"messages": [{"role": "user", "content": message}]},
-        config=config,
-        stream_mode="updates",
-    ):
-        if not isinstance(chunk, dict):
-            continue
-        for node_name, update in chunk.items():
-            print_stream_update(node_name, update)
-
-    snapshot = agent.get_state(config)
-    values = getattr(snapshot, "values", None)
-    return resolve_agent_state(agent, config, values if isinstance(values, dict) else snapshot)
-
-
-def run_stream_query(
-    user_message: str,
-    settings: DeepAgentSettings | None = None,
-    data_tools: list[BaseTool] | None = None,
-) -> Any:
-    """Один запрос в stream-режиме: видны node-обновления, tool calls и ответы."""
-
-    settings = settings or load_deep_agent_settings()
-    agent = build_chat_agent(settings=settings, data_tools=data_tools)
-    config = make_config(settings.thread_id)
-
-    print(f"Запрос: {user_message}", flush=True)
-    print("Агент: stream...", flush=True)
-    state = stream_user_message(agent, config, user_message)
-    print_loaded_skills_once(state, already_printed=False)
-    return state
-
-
-def print_stream_update(node_name: str, update: Any) -> None:
-    """Печатает одно stream-обновление LangGraph (имя node + новые messages/todos/skills)."""
-
-    print(f"\n[stream] {node_name}", flush=True)
-    if update is None or not isinstance(update, dict):
-        return
-
-    skill_paths = update.get("preloaded_skill_paths")
-    if isinstance(skill_paths, list) and skill_paths:
-        print("  skills:", ", ".join(map(str, skill_paths)), flush=True)
-
-    todos = update.get("todos")
-    if isinstance(todos, list) and todos:
-        print("  todos:", flush=True)
-        print(_indent_text(format_todos_for_user(todos), prefix="    "), flush=True)
-
-    messages = update.get("messages")
-    if isinstance(messages, list) and messages:
-        print_messages({"messages": messages}, start_index=0)
+    try:
+        return agent.invoke({"messages": [{"role": "user", "content": message}]}, config=config)
+    except GraphRecursionError:
+        # Бюджет графа исчерпан: не роняем прогон, а отдаём то, что уже накоплено в state.
+        # Частичный прогресс печатается вызывающим кодом через resolve_agent_state.
+        print()
+        print(
+            "Достигнут лимит шагов графа (recursion_limit): агент не успел сформировать "
+            "финальный ответ. Ниже — частичный прогресс. Уточните запрос или увеличьте "
+            "graph_recursion_limit в конфиге."
+        )
+        print()
+        return None
 
 
 def print_loaded_skills_once(result: Any, *, already_printed: bool) -> bool:
+    """Печатает список предзагруженных skills один раз за сессию."""
+
     if already_printed or not isinstance(result, dict):
         return already_printed
 
@@ -256,6 +244,8 @@ def print_messages(state: Any, *, start_index: int = 0) -> int:
 
 
 def resolve_agent_state(agent: Any, config: dict[str, Any], result: Any) -> Any:
+    """Возвращает актуальный state агента из чекпойнтера, иначе — исходный результат."""
+
     get_state = getattr(agent, "get_state", None)
     if get_state is None:
         return result
@@ -276,6 +266,8 @@ def resolve_agent_state(agent: Any, config: dict[str, Any], result: Any) -> Any:
 
 
 def last_agent_response_text(result: Any) -> str:
+    """Возвращает текст последнего финального ответа агента (AIMessage без tool_calls)."""
+
     if not isinstance(result, dict):
         return ""
 
@@ -294,6 +286,8 @@ def last_agent_response_text(result: Any) -> str:
 
 
 def format_todos_for_user(todos: list[dict[str, Any]]) -> str:
+    """Форматирует список todo в нумерованный план с человекочитаемыми статусами."""
+
     if not todos:
         return "План не указан."
 
@@ -312,6 +306,8 @@ def format_todos_for_user(todos: list[dict[str, Any]]) -> str:
 
 
 def message_to_text(message: Any) -> str:
+    """Приводит content сообщения (строку, список блоков или объект) к тексту."""
+
     content = getattr(message, "content", None)
     if content is None and isinstance(message, dict):
         content = message.get("content")
@@ -322,15 +318,9 @@ def message_to_text(message: Any) -> str:
     return str(message)
 
 
-def iter_tool_calls(messages: Iterable[Any]) -> Iterable[tuple[str, Any]]:
-    for message in messages:
-        if not isinstance(message, AIMessage):
-            continue
-        for tool_call in getattr(message, "tool_calls", None) or []:
-            yield str(tool_call.get("name") or ""), tool_call.get("args")
-
-
 def _message_count(state: Any) -> int:
+    """Возвращает число сообщений в state (0, если поле отсутствует/не список)."""
+
     if not isinstance(state, dict):
         return 0
     messages = state.get("messages")
@@ -338,6 +328,8 @@ def _message_count(state: Any) -> int:
 
 
 def _initial_message_cursor(agent: Any, config: dict[str, Any]) -> int:
+    """Возвращает стартовый курсор сообщений, чтобы печатать только новые."""
+
     get_state = getattr(agent, "get_state", None)
     if get_state is None:
         return 0
@@ -352,6 +344,8 @@ def _initial_message_cursor(agent: Any, config: dict[str, Any]) -> int:
 
 
 def format_tool_call(tool_name: str, args: Any) -> str:
+    """Форматирует вызов инструмента для вывода в терминал (план/subagent/аргументы)."""
+
     lines = [f"[Tool call] {tool_name}"]
     if tool_name == "write_todos" and isinstance(args, dict):
         lines.append("План:")
@@ -374,12 +368,16 @@ def format_tool_call(tool_name: str, args: Any) -> str:
 
 
 def format_tool_result(tool_name: str, content: str, *, status: str = "success") -> str:
+    """Форматирует результат инструмента для терминала: заголовок + краткое содержание."""
+
     lines = [f"[Tool result] {tool_name} [{status}]"]
     lines.append(_summarize_tool_result(tool_name, content))
     return "\n".join(lines)
 
 
 def _summarize_tool_result(tool_name: str, content: str) -> str:
+    """Готовит компактное резюме результата tool под его тип (read_table/python/spill)."""
+
     text = str(content or "").strip()
     if not text:
         return "  (пустой результат)"
@@ -417,6 +415,8 @@ def _summarize_tool_result(tool_name: str, content: str) -> str:
 
 
 def _format_read_table_result_summary(payload: Any) -> str:
+    """Резюмирует ответ read_table: статус, таблица, число строк, колонки, preview."""
+
     if not isinstance(payload, dict):
         return _truncate_text(str(payload), TOOL_RESULT_PREVIEW_CHARS)
 
@@ -450,6 +450,8 @@ def _format_read_table_result_summary(payload: Any) -> str:
 
 
 def _format_execute_python_result_summary(payload: dict[str, Any]) -> str:
+    """Резюмирует ответ execute_python_code: успех, сообщение, вывод/ошибка/traceback."""
+
     lines = [
         f"success: {payload.get('success')}",
         f"message: {payload.get('message', '')}",
@@ -477,6 +479,8 @@ def _format_execute_python_result_summary(payload: dict[str, Any]) -> str:
 
 
 def _format_spill_file_summary(parsed: dict[str, Any], raw_text: str) -> str:
+    """Резюмирует offload-результат: путь к файлу, формат и число строк."""
+
     lines: list[str] = []
     for key in ("saved_file", "file_path", "format", "rows"):
         if key in parsed:
@@ -489,12 +493,16 @@ def _format_spill_file_summary(parsed: dict[str, Any], raw_text: str) -> str:
 
 
 def _looks_like_read_table_payload(payload: Any) -> bool:
+    """Эвристически определяет, что JSON-ответ похож на результат read_table."""
+
     return isinstance(payload, dict) and (
         "table_name" in payload or "returned_rows" in payload or "rows" in payload
     )
 
 
 def _try_parse_json(text: str) -> Any | None:
+    """Пробует распарсить текст как JSON; возвращает ``None`` при неудаче."""
+
     try:
         return json.loads(text)
     except (TypeError, ValueError, json.JSONDecodeError):
@@ -502,6 +510,8 @@ def _try_parse_json(text: str) -> Any | None:
 
 
 def _format_json_preview(value: Any) -> str:
+    """Сериализует значение в JSON с обрезкой до лимита превью аргументов."""
+
     try:
         rendered = json.dumps(value, ensure_ascii=False, indent=2, default=str)
     except TypeError:
@@ -510,23 +520,35 @@ def _format_json_preview(value: Any) -> str:
 
 
 def _truncate_text(text: str, max_chars: int) -> str:
+    """Обрезает текст до ``max_chars`` с пометкой о числе отброшенных символов."""
+
     if len(text) <= max_chars:
         return text
     return f"{text[:max_chars]}\n...[truncated {len(text) - max_chars} chars]"
 
 
 def _indent_text(text: str, *, prefix: str) -> str:
+    """Добавляет отступ ``prefix`` к каждой строке текста."""
+
     return "\n".join(f"{prefix}{line}" if line else prefix.rstrip() for line in text.splitlines())
 
 
 def main() -> int:
+    """Делает один demo-``invoke`` на тестовых CSV и печатает ход выполнения."""
+
     settings = load_deep_agent_settings()
     test_data_tools = build_test_data_tools(TEST_DATA_DIR)
     agent = build_chat_agent(settings=settings, data_tools=test_data_tools)
-    config = make_config(settings.thread_id)
+    trace_handler = build_file_trace_handler(settings.trace_log_dir, label="demo")
+    config = make_config(
+        settings.thread_id,
+        callbacks=[trace_handler],
+        recursion_limit=settings.graph_recursion_limit,
+    )
 
     user_message = DEFAULT_DEMO_QUERY
     print(f"Запрос: {user_message}", flush=True)
+    print(f"Лог хода агента: {trace_handler.file_path}", flush=True)
     print("Агент: обрабатываю запрос...", flush=True)
 
     result = invoke_user_message(agent, config, user_message)

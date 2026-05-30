@@ -18,10 +18,10 @@ model = ChatOpenAI(
     # api_key="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",
     api_key="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",
     # model="deepseek/deepseek-v4-pro",
-    # model="nvidia/nemotron-3-super-120b-a12b",
-    # model="qwen/qwen3.5-397b-a17b",
+    #model="nvidia/nemotron-3-super-120b-a12b",
+    model="qwen/qwen3.5-397b-a17b",
     # google/gemini-3-pro-preview
-    model="google/gemini-2.5-flash",
+    #model="google/gemini-2.5-flash",
     #model="deepseek/deepseek-v4-flash",
     #model="google/gemini-2.5-flash-lite",
     #model="tencent/hy3-preview",

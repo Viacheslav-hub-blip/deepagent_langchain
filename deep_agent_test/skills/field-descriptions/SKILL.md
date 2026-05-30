@@ -3,11 +3,19 @@ name: field-descriptions
 description: "Справочник полей из таблиц hits, cards_event и uko_event: имена полей и краткий бизнес-смысл каждого поля."
 ---
 
-# Описание файла
+# Поля
 
-Справочник полей из доступных источников. Содержит только имена полей и краткое описание смысла каждого поля без описания таблиц.
+Имя поля - бизнес-смысл. Форматы дат/времени и ключи связи по конкретной таблице — в skills таблиц (`hit-table`, `cards-event-table`, `uko-event-table`).
 
-# Описание полей
+## Ключевые поля связи и времени
+
+- `event_id` - идентификатор события. В hits — id сработки; в raw-таблицах — id исходного события, может совпадать с hits.
+- `epk_id` - идентификатор клиента ЕПК. Клиентский ключ связи hits ↔ raw-таблицы.
+- `event_dt` - дата события в формате `YYYYMMDD` (`20260124`). Основное поле для фильтрации по дню и связи hits ↔ raw-таблицы.
+- `event_time` - время события. В hits и `cards_event` — `YYYY-MM-DD HH:MM:SS`; в `uko_event` — Unix epoch в миллисекундах. **Не переноси значение из hits в фильтр `uko_event.event_time`.**
+- `event_dttm_readable` - читаемое дата-время `YYYY-MM-DD HH:MM:SS`. В `uko_event` используй для точного времени вместо `event_time`.
+
+## Остальные поля
 
 - `accept_time_sec` - время подтверждения в секундах.
 - `age` - возраст клиента.
@@ -60,13 +68,8 @@ description: "Справочник полей из таблиц hits, cards_even
 - `device_time` - время на устройстве.
 - `dul_number` - номер документа клиента.
 - `dul_type` - тип документа клиента.
-- `epk_id` - идентификатор клиента ЕПК.
 - `event_channel` - канал события.
 - `event_description` - текстовое описание события.
-- `event_dt` - дата события в формате `YYYYMMDD` (например, `20260124`). Основное поле для фильтрации по дню и связи hits ↔ raw-таблицы.
-- `event_dttm_readable` - читаемая дата-время события в формате `YYYY-MM-DD HH:MM:SS`. В `uko_event` используй для точного времени вместо `event_time`.
-- `event_id` - идентификатор события. В hits это идентификатор сработки/события; в raw-таблицах это идентификатор исходного события, который может совпадать с hits.
-- `event_time` - поле времени события. В hits и `cards_event` — читаемый datetime `YYYY-MM-DD HH:MM:SS`; в `uko_event` — Unix epoch в миллисекундах. **Не переноси значение `event_time` из hits в фильтр `uko_event.event_time`.** Для дневного поиска используй `event_dt`.
 - `event_type` - тип события.
 - `final_marker_payer` - итоговый маркер плательщика.
 - `fio` - ФИО клиента.
@@ -162,10 +165,10 @@ description: "Справочник полей из таблиц hits, cards_even
 - `type_accept` - тип подтверждения.
 - `type_operation` - тип операции.
 - `user_id` - идентификатор пользователя.
-- `user_ip_location_city` - город пользователя, определенный по IP в raw-событии.
-- `user_ip_location_country` - страна пользователя, определенная по IP в raw-событии.
-- `user_ip_location_country_code` - код страны пользователя, определенный по IP в raw-событии.
-- `user_ip_location_region` - регион пользователя, определенный по IP в raw-событии.
+- `user_ip_location_city` - город пользователя по IP в raw-событии.
+- `user_ip_location_country` - страна пользователя по IP в raw-событии.
+- `user_ip_location_country_code` - код страны пользователя по IP в raw-событии.
+- `user_ip_location_region` - регион пользователя по IP в raw-событии.
 - `user_login_id` - идентификатор логина.
 - `user_mobile_hardware_id_days_since_first_hit` - возраст hardware_id от первого hit.
 - `version_mp` - версия мобильного приложения.

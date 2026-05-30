@@ -41,18 +41,29 @@ class ToolOutputFileMiddlewareTests(unittest.TestCase):
                 loaded_rows = pickle.load(file)
             self.assertEqual(len(loaded_rows), 12)
 
-    def test_small_result_not_saved(self) -> None:
+    def test_small_result_saved_to_pkl_but_keeps_inline_content(self) -> None:
         rows = [{"id": 1}]
         with tempfile.TemporaryDirectory() as temp_dir:
-            middleware = ToolOutputFileMiddleware(output_dir=Path(temp_dir))
+            middleware = ToolOutputFileMiddleware(
+                output_dir=Path(temp_dir),
+                min_rows_to_save=10,
+                min_content_chars_to_save=60000,
+            )
             original = ToolMessage(
-                content="small",
+                content="small inline payload",
                 tool_call_id="call-1",
                 name="read_table",
                 artifact={"rows": rows},
             )
             processed = middleware._process_tool_message(result=original, tool_name="read_table")
-            self.assertIs(processed, original)
+            self.assertIn("small inline payload", str(processed.content))
+            self.assertIn("переиспользования", str(processed.content).lower())
+            self.assertIn(".pkl", str(processed.content))
+
+            saved_path = Path(processed.artifact["saved_file"])
+            self.assertTrue(saved_path.exists())
+            with saved_path.open("rb") as file:
+                self.assertEqual(pickle.load(file), rows)
 
 
 if __name__ == "__main__":
