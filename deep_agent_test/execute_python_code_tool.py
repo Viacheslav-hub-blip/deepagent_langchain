@@ -33,6 +33,7 @@ ALLOWED_IMPORT_ROOTS: frozenset[str] = frozenset(
         "math",
         "matplotlib",
         "numpy",
+        "os",
         "pandas",
         "pathlib",
         "pickle",
@@ -91,7 +92,7 @@ EXECUTE_PYTHON_CODE_DESCRIPTION = """
 - `pd`, `np` — pandas/numpy, если установлены.
 
 Пример чтения spill-файла:
-rows = read_pickle_file(r"C:\\path\\to\\file.pkl")
+rows = read_pickle_file(r"<saved_file из tool output>")
 df = rows_to_dataframe(rows)
 print(df.shape)
 print(df.head(3).to_string())
@@ -102,7 +103,8 @@ result = df
 - для именованного результата укажи `target_variable`, иначе используй `print()` и читай `execution_output`;
 - при ошибке tool возвращает JSON с `error`, полным `traceback`, `possible_causes`, `solution_options`, `retry_guidance` — исправь код и повтори вызов;
 - не удаляй файлы и директории;
-- читай pickle через `read_pickle_file` или `pd.read_pickle` по путям из tool outputs.
+- можно импортировать `os` для просмотра директорий, но удаление файлов и shell-вызовы запрещены;
+- читай pickle через `read_pickle_file` или `pd.read_pickle` по `saved_file` из tool outputs.
 """.strip()
 
 

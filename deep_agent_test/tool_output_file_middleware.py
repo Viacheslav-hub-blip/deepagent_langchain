@@ -74,9 +74,11 @@ class ToolOutputFileMiddleware(AgentMiddleware):
             output_dir=self.output_dir,
             tool_name=tool_name,
         )
+        virtual_path = _virtual_tool_output_path(file_path=file_path, output_dir=self.output_dir)
         query_metadata = _extract_query_metadata(result.artifact)
         artifact = {
             "saved_file": str(file_path),
+            "virtual_file": virtual_path,
             "format": "pkl",
             "rows": len(rows),
             "columns": sorted({key for row in rows for key in row}),
@@ -90,6 +92,7 @@ class ToolOutputFileMiddleware(AgentMiddleware):
             content = _build_file_summary(
                 tool_name=tool_name,
                 file_path=file_path,
+                virtual_path=virtual_path,
                 rows=rows,
                 preview_rows=self.preview_rows,
                 original_content=content_text,
@@ -99,6 +102,7 @@ class ToolOutputFileMiddleware(AgentMiddleware):
         else:
             content = content_text + _build_inline_saved_file_note(
                 file_path=file_path,
+                virtual_path=virtual_path,
                 rows=rows,
                 query_metadata=query_metadata,
             )
@@ -165,10 +169,30 @@ def _write_rows_to_pkl(*, rows: list[dict[str, Any]], output_dir: Path, tool_nam
     return file_path.resolve()
 
 
+def _virtual_tool_output_path(*, file_path: Path, output_dir: Path) -> str:
+    """Строит виртуальный путь `/tool_outputs/...` для файловых инструментов DeepAgents.
+
+    Args:
+        file_path: Абсолютный путь к сохранённому pickle-файлу.
+        output_dir: Локальная папка, смонтированная в backend как `/tool_outputs/`.
+
+    Returns:
+        Виртуальный путь, который можно передавать в filesystem tools (`read_file`, `ls`,
+        `glob`) внутри DeepAgents.
+    """
+
+    try:
+        relative_path = file_path.resolve().relative_to(output_dir.resolve()).as_posix()
+    except ValueError:
+        relative_path = file_path.name
+    return f"/tool_outputs/{relative_path}"
+
+
 def _build_file_summary(
     *,
     tool_name: str,
     file_path: Path,
+    virtual_path: str,
     rows: list[dict[str, Any]],
     preview_rows: int,
     original_content: str,
@@ -192,13 +216,15 @@ def _build_file_summary(
         f"ВАЖНО: всего в результате (в файле) {len(rows)} строк — это полный объём этого "
         f"запроса; в контексте сейчас лишь {len(preview)} строк для ознакомления.\n"
         f"Файл: {resolved_path.name}\n"
-        f"Путь: {resolved_path}\n"
+        f"saved_file: {resolved_path}\n"
+        f"virtual_file: {virtual_path}\n"
         f"Формат: pickle (list[dict]).\n"
         f"Строк в файле: {len(rows)}; колонок: {len(columns)}.\n"
         f"Колонки: {', '.join(map(str, columns))}.\n"
         "Чтобы работать со ВСЕМИ строками или с урезанной выборкой из этого набора, используй "
         "`execute_python_code` (НЕ новый read_table). Helpers: read_pickle_file, "
-        "describe_pickle_file, rows_to_dataframe, pd, np. Пример:\n"
+        "describe_pickle_file, rows_to_dataframe, pd, np. Для Python используй `saved_file`; "
+        "для filesystem tools (`read_file`, `ls`, `glob`) используй `virtual_file`. Пример:\n"
         f"rows = read_pickle_file(r\"{resolved_path}\")\n"
         "df = rows_to_dataframe(rows)\n"
         "При ошибке execute_python_code читай traceback из ответа tool и исправляй код.\n"
@@ -225,6 +251,7 @@ def _extract_query_metadata(artifact: Any) -> dict[str, Any] | None:
 def _build_inline_saved_file_note(
     *,
     file_path: Path,
+    virtual_path: str,
     rows: list[dict[str, Any]],
     query_metadata: dict[str, Any] | None = None,
 ) -> str:
@@ -236,7 +263,8 @@ def _build_inline_saved_file_note(
     return (
         "\n\n[Полный результат сохранён в pickle для переиспользования без повторного read_table]\n"
         f"{query_note}"
-        f"Путь: {resolved_path}\n"
+        f"saved_file: {resolved_path}\n"
+        f"virtual_file: {virtual_path}\n"
         f"Строк в файле: {len(rows)}; колонок: {len(columns)}.\n"
         f"Колонки: {', '.join(map(str, columns))}.\n"
         "Если следующий шаг — урезанная выборка из ЭТОГО же набора (другие фильтры, подмножество "

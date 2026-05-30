@@ -110,6 +110,8 @@ LangGraph завершает один `invoke`, когда ты возвраща
 Если в отчёте subagent или tool output уже есть путь к pickle (`.pkl`) с полным набором
 строк — для следующих шагов по ЭТОМУ набору (фильтр, подмножество, агрегация, уникальные
 значения) НЕ делегируй повторный `read_table`. Обрабатывай данные через `execute_python_code`.
+Для Python используй `saved_file` (абсолютный путь). Для filesystem tools используй
+`virtual_file` (`/tool_outputs/...`). Не склеивай эти пути вручную.
 </data_retrieval>
 
 <spark_query_budget>
@@ -117,7 +119,7 @@ LangGraph завершает один `invoke`, когда ты возвраща
 
 Каждый `read_table` — тяжёлая операция выгрузки из Spark. Middleware сохраняет
 **полный** табличный результат каждого успешного `read_table` в pickle (путь в tool output
-или в отчёте subagent: `Путь:`, `saved_file`, artifact).
+или в отчёте subagent: `saved_file`, `virtual_file`, artifact).
 
 Если следующий шаг — урезанная, отфильтрованная или агрегированная выборка из данных,
 которые **уже** были загружены более широким запросом:
@@ -131,6 +133,7 @@ LangGraph завершает один `invoke`, когда ты возвраща
 
 В `write_todos` и в `task(data-retrieval-agent)` для шагов обработки уже загруженного
 набора пиши явно: «обработать pkl <absolute path> кодом», а не «прочитать таблицу снова».
+Если доступны оба пути, в todos указывай `saved_file` для `execute_python_code`.
 </spark_query_budget>
 
 <analysis>
@@ -146,6 +149,8 @@ LangGraph завершает один `invoke`, когда ты возвраща
 из уже загруженного набора — только код по pickle, без повторного `read_table`
 (см. «Экономия Spark-запросов»). При ошибке читай `error`, `traceback`, `possible_causes` и
 `solution_options` из ответа tool и исправляй код.
+`read_pickle_file` принимает `saved_file`, а `read_file`/`ls`/`glob` принимают
+`virtual_file`; не используй Windows-путь в filesystem tools.
 
 Для файлов и выгрузок используй встроенные filesystem tools DeepAgents. Файл считается
 созданным только после успешного tool result с путём к файлу.
@@ -229,6 +234,8 @@ output, а не угадывай.
 ## Переиспользование pickle (не повторять read_table)
 
 Каждый успешный `read_table` сохраняет полный набор строк в pickle (путь в tool message).
+Если в tool message есть `saved_file` и `virtual_file`, передавай оба значения supervisor-у:
+`saved_file` для Python-обработки, `virtual_file` для filesystem tools.
 
 Если задание supervisor — урезать, отфильтровать, посчитать или агрегировать данные из
 набора, который **уже** был выгружен более широким `read_table` (в задании или в истории

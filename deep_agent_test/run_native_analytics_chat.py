@@ -22,10 +22,10 @@ TOOL_ARGS_PREVIEW_CHARS = 2500
 TOOL_RESULT_PREVIEW_CHARS = 3500
 #DEFAULT_DEMO_QUERY = "Какой город по IP у сработки 3486d84b-4eba-4ba4-b044-94764fc9e7a4?"
 #DEFAULT_DEMO_QUERY = "найди все сработки связанные с образованием за январь 2026 года"
-DEFAULT_DEMO_QUERY = "создай новый файл для записи skill, назови папку test-skill"
-# DEFAULT_DEMO_QUERY = "средняя сумма транзакции у сработок с правилом 'DENY оплата обучения после смены устройства'"
-# DEFAULT_DEMO_QUERY = "построй распределение сработок по age category в виде графика за январь 2026, сохрани в файл"
-# DEFAULT_DEMO_QUERY = "что делал клиент в день сработки и за день до сработки? id сработки 3486d84b-4eba-4ba4-b044-94764fc9e7a4"
+#DEFAULT_DEMO_QUERY = "создай новый файл для записи skill, назови папку test-skill"
+#DEFAULT_DEMO_QUERY = "средняя сумма транзакции у сработок с правилом 'DENY оплата обучения после смены устройства'. Если тебе удастся получить ответ, то сохрани правильную последовательность действий в виде skill"
+#DEFAULT_DEMO_QUERY = "построй распределение сработок по age category в виде графика за январь 2026, сохрани в файл"
+DEFAULT_DEMO_QUERY = "что делал клиент в день сработки и за день до сработки? id сработки 3486d84b-4eba-4ba4-b044-94764fc9e7a4"
 
 def build_chat_agent(settings: DeepAgentSettings | None = None, data_tools: list[BaseTool] | None = None) -> Any:
     """Собирает аналитический DeepAgent на модели из корневого ``model.py``."""
