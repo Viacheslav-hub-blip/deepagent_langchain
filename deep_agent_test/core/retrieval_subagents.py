@@ -1,4 +1,11 @@
-"""Сборка data-retrieval subagent с вложенным critic через нативный DeepAgents ``task``."""
+"""Сборка data-retrieval subagent с вложенным critic через нативный DeepAgents ``task``.
+
+Содержит:
+- build_data_retrieval_critic_tools: инструменты critic-а.
+- build_critic_filesystem_permissions: права critic-а на чтение артефактов.
+- build_data_retrieval_subagent_spec: спецификация data-retrieval-agent.
+- build_analytics_subagent_specs: список subagents для supervisor-а.
+"""
 
 from __future__ import annotations
 
@@ -46,7 +53,7 @@ def build_data_retrieval_subagent_spec(
     critic_middleware: list[Any] | None = None,
     enable_critic: bool = True,
 ) -> dict[str, Any]:
-    """data-retrieval-agent: read_table + (опционально) внутренний task(critic) в одном invoke.
+    """data-retrieval-agent: load_data + (опционально) внутренний task(critic) в одном invoke.
 
     ``critic_middleware`` намеренно не содержит skills-middleware: critic не должен
     загружать domain skills, он только верифицирует ответ по реальным tool results.
@@ -61,7 +68,7 @@ def build_data_retrieval_subagent_spec(
         return {
             "name": DATA_RETRIEVAL_AGENT_NAME,
             "description": (
-                "Читает табличные данные через read_table и возвращает структурированный "
+                "Читает табличные данные через load_data и возвращает структурированный "
                 "отчёт supervisor-у. Используй для выборок по полям, фильтрам, ключам и периоду."
             ),
             "system_prompt": DATA_RETRIEVAL_PROMPT_WITHOUT_CRITIC,
@@ -95,7 +102,7 @@ def build_data_retrieval_subagent_spec(
     return {
         "name": DATA_RETRIEVAL_AGENT_NAME,
         "description": (
-            "Читает табличные данные через read_table. Внутри выполняет проверку critic-ом "
+            "Читает табличные данные через load_data. Внутри выполняет проверку critic-ом "
             "перед ответом supervisor-у. Используй для выборок по полям, фильтрам, ключам и периоду."
         ),
         "system_prompt": DATA_RETRIEVAL_PROMPT,

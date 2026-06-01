@@ -1,7 +1,7 @@
-"""Production-инструмент ``read_table`` поверх общей Spark session.
+"""Production-инструмент ``load_data`` поверх общей Spark session.
 
 Содержит:
-- ReadTableInput: строковая схема аргументов инструмента ``read_table``.
+- ReadTableInput: строковая схема аргументов инструмента ``load_data``.
 - build_spark_data_tools: сборка LangChain tool поверх готовой Spark session.
 - _read_table: выполнение выборки через Spark DataFrame API.
 - _apply_derived_columns: добавление вычисляемых колонок.
@@ -31,7 +31,7 @@ from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field
 
 READ_TABLE_DESCRIPTION = (
-    "read_table\n"
+    "load_data\n"
     "---\n"
     "Описание: универсальная выборка из Spark-таблиц. "
     "Инструмент принимает имя таблицы, строку со списком полей, строковые фильтры, "
@@ -79,7 +79,7 @@ class ReadTableInput(BaseModel):
         include_schema: Нужно ли приложить схему результата в metadata DataFrame.
 
     Returns:
-        Валидированные строковые параметры для ``read_table``.
+        Валидированные строковые параметры для ``load_data``.
     """
 
     table_name: str = Field(description="Имя Spark-таблицы или view, например csp_afpc_sss_inc.uko_event.")
@@ -106,13 +106,13 @@ class ReadTableInput(BaseModel):
 
 
 def build_spark_data_tools(spark: Any) -> list[BaseTool]:
-    """Создает инструмент ``read_table`` поверх готовой Spark session.
+    """Создает инструмент ``load_data`` поверх готовой Spark session.
 
     Args:
         spark: Активная ``pyspark.sql.SparkSession``, созданная один раз при старте приложения.
 
     Returns:
-        Список с одним LangChain tool ``read_table``.
+        Список с одним LangChain tool ``load_data``.
     """
 
     def read_table(
@@ -159,7 +159,7 @@ def build_spark_data_tools(spark: Any) -> list[BaseTool]:
     return [
         StructuredTool.from_function(
             func=read_table,
-            name="read_table",
+            name="load_data",
             description=READ_TABLE_DESCRIPTION,
             args_schema=ReadTableInput,
         )
@@ -242,7 +242,7 @@ def _read_table(
             }
         return frame
     except ValueError as exc:
-        return f"Ошибка read_table: {exc}"
+        return f"Ошибка load_data: {exc}"
 
 
 def _apply_derived_columns(*, table: Any, derived_columns: str) -> Any:
@@ -604,10 +604,10 @@ def _validate_columns(*, columns: list[str], available_columns: list[str], allow
 
     normalized = [column for column in columns if column]
     if not normalized and not allow_empty:
-        return "Ошибка read_table: нужно явно указать select_columns или aggregations. '*' и 'all' запрещены."
+        return "Ошибка load_data: нужно явно указать select_columns или aggregations. '*' и 'all' запрещены."
     forbidden = {column.lower() for column in normalized} & {"*", "all"}
     if forbidden:
-        return "Ошибка read_table: нельзя запрашивать все поля. Укажи минимально нужные колонки."
+        return "Ошибка load_data: нельзя запрашивать все поля. Укажи минимально нужные колонки."
     missing = sorted({column for column in normalized if column not in set(available_columns)})
     return _format_missing_columns(missing=missing, available_columns=available_columns) if missing else ""
 
@@ -624,7 +624,7 @@ def _format_missing_columns(*, missing: list[str], available_columns: list[str])
     """
 
     return (
-        "Ошибка read_table: в таблице нет колонок из запроса.\n"
+        "Ошибка load_data: в таблице нет колонок из запроса.\n"
         f"Отсутствующие поля: {', '.join(missing)}.\n"
         f"Доступные поля ({len(available_columns)}): {', '.join(available_columns)}."
     )

@@ -1,7 +1,7 @@
-"""Временный fake-инструмент ``read_table`` для тестов без Spark.
+"""Временный fake-инструмент ``load_data`` для тестов без Spark.
 
 Содержит:
-- FakeReadTableInput: строковая схема аргументов fake-инструмента ``read_table``.
+- FakeReadTableInput: строковая схема аргументов fake-инструмента ``load_data``.
 - build_fake_spark_data_tools: сборка LangChain tool поверх CSV-файлов из ``data``.
 - _fake_read_table: выполнение выборки через pandas DataFrame API.
 - _load_table_frame: чтение CSV-файла по жестко заданной карте таблиц.
@@ -48,11 +48,11 @@ FAKE_TABLE_FILES: dict[str, str] = {
 }
 
 FAKE_READ_TABLE_DESCRIPTION = (
-    "read_table\n"
+    "load_data\n"
     "---\n"
     "Описание: временный fake-инструмент для тестирования агента без Spark. "
     "Читает CSV-файлы из локальной папки data и поддерживает тот же строковый "
-    "интерфейс, что production read_table: select_columns, filters, derived_columns, "
+    "интерфейс, что production load_data: select_columns, filters, derived_columns, "
     "group_by, aggregations, order_by, max_rows и include_schema. "
     "Инструмент временный, использует хардкод таблиц и не должен встраиваться "
     "в production-логику проекта."
@@ -78,7 +78,7 @@ class FakeReadTableInput(BaseModel):
         include_schema: Нужно ли приложить схему результата в metadata DataFrame.
 
     Returns:
-        Валидированные строковые параметры для fake ``read_table``.
+        Валидированные строковые параметры для fake ``load_data``.
     """
 
     table_name: str = Field(description="Имя fake-таблицы, например csp_afpc_sss_inc.uko_event.")
@@ -93,13 +93,13 @@ class FakeReadTableInput(BaseModel):
 
 
 def build_fake_spark_data_tools() -> list[BaseTool]:
-    """Создает временный fake ``read_table`` поверх CSV-файлов из папки ``data``.
+    """Создает временный fake ``load_data`` поверх CSV-файлов из папки ``data``.
 
     Args:
         Отсутствуют. Папка ``data`` и имена таблиц заданы хардкодом в этом модуле.
 
     Returns:
-        Список с одним LangChain tool ``read_table`` для тестов агента без Spark.
+        Список с одним LangChain tool ``load_data`` для тестов агента без Spark.
     """
 
     def read_table(
@@ -145,7 +145,7 @@ def build_fake_spark_data_tools() -> list[BaseTool]:
     return [
         StructuredTool.from_function(
             func=read_table,
-            name="read_table",
+            name="load_data",
             description=FAKE_READ_TABLE_DESCRIPTION,
             args_schema=FakeReadTableInput,
         )
@@ -226,7 +226,7 @@ def _fake_read_table(
             }
         return result.reset_index(drop=True)
     except ValueError as exc:
-        return f"Ошибка read_table: {exc}"
+        return f"Ошибка load_data: {exc}"
 
 
 def _load_table_frame(table_name: str) -> pd.DataFrame:
@@ -645,10 +645,10 @@ def _validate_columns(*, columns: list[str], available_columns: list[str], allow
 
     normalized = [column for column in columns if column]
     if not normalized and not allow_empty:
-        return "Ошибка read_table: нужно явно указать select_columns или aggregations. '*' и 'all' запрещены."
+        return "Ошибка load_data: нужно явно указать select_columns или aggregations. '*' и 'all' запрещены."
     forbidden = {column.lower() for column in normalized} & {"*", "all"}
     if forbidden:
-        return "Ошибка read_table: нельзя запрашивать все поля. Укажи минимально нужные колонки."
+        return "Ошибка load_data: нельзя запрашивать все поля. Укажи минимально нужные колонки."
     missing = sorted({column for column in normalized if column not in set(available_columns)})
     return _format_missing_columns(missing=missing, available_columns=available_columns) if missing else ""
 
@@ -665,7 +665,7 @@ def _format_missing_columns(*, missing: list[str], available_columns: list[str])
     """
 
     return (
-        "Ошибка read_table: в таблице нет колонок из запроса.\n"
+        "Ошибка load_data: в таблице нет колонок из запроса.\n"
         f"Отсутствующие поля: {', '.join(missing)}.\n"
         f"Доступные поля ({len(available_columns)}): {', '.join(available_columns)}."
     )

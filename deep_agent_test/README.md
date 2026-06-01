@@ -11,7 +11,7 @@ python run.py
 ```
 
 В `run.py` нет параметров командной строки. В нем создается Spark session, собирается
-инструмент `read_table`, собирается агент и выполняется один `invoke`.
+инструмент `load_data`, собирается агент и выполняется один `invoke`.
 
 ## Что добавлено к базовому DeepAgent
 
@@ -29,7 +29,7 @@ python run.py
 2. Data-retrieval subagent.
 
    Основной агент не читает таблицы напрямую. Для чтения данных он вызывает
-   `data-retrieval-agent`. Этот subagent получает задачу, вызывает `read_table` и
+   `data-retrieval-agent`. Этот subagent получает задачу, вызывает `load_data` и
    возвращает supervisor-у короткий структурированный отчет.
 
 3. Опциональный critic для чтения данных.
@@ -40,11 +40,11 @@ python run.py
 
 4. Инструмент чтения Spark-таблиц.
 
-   `build_spark_data_tools(spark)` создает tool `read_table`. Tool принимает простые
+   `build_spark_data_tools(spark)` создает tool `load_data`. Tool принимает простые
    строковые аргументы. В схемах инструмента нет входных `list[]`: списки колонок,
    фильтров, агрегаций и сортировок передаются строкой и разбираются внутри инструмента.
 
-5. Прозрачный ответ `read_table`.
+5. Прозрачный ответ `load_data`.
 
    Обертка над data-tools добавляет к результату SQL-подобное описание запроса:
    какие поля читались, из какой таблицы, какие фильтры применялись. Это снижает риск,
@@ -87,7 +87,7 @@ deep_agent_test/
     critic_loop_cap.py        # лимит проверок critic-а
 
   tools/
-    spark_data.py             # read_table поверх Spark session
+    spark_data.py             # load_data поверх Spark session
     data_tools_wrapper.py     # прозрачное описание запросов к data-tools
     execute_python_code.py    # безопасное выполнение Python-кода
     load_skills.py            # ручная дозагрузка skills
@@ -154,7 +154,7 @@ deep_agent_test/resources/config/defaults.json
 Если нужен отдельный конфиг для другого проекта, укажите путь в переменной окружения
 `DEEP_AGENT_CONFIG_PATH`. Значения из этого файла переопределят defaults.
 
-## Формат `read_table`
+## Формат `load_data`
 
 Все сложные параметры передаются строками.
 

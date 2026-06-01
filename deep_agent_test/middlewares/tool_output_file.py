@@ -21,7 +21,7 @@ from langgraph.types import Command
 class ToolOutputFileMiddleware(AgentMiddleware):
     """Сохраняет табличные tool outputs в pickle и управляет тем, что попадает в контекст.
 
-    Полный набор строк каждого табличного результата (например ``read_table``) всегда
+    Полный набор строк каждого табличного результата (например ``load_data``) всегда
     пишется в ``.pkl`` — для переиспользования без повторного Spark-запроса.
 
     В контекст модели:
@@ -222,7 +222,7 @@ def _build_file_summary(
         f"Строк в файле: {len(rows)}; колонок: {len(columns)}.\n"
         f"Колонки: {', '.join(map(str, columns))}.\n"
         "Чтобы работать со ВСЕМИ строками или с урезанной выборкой из этого набора, используй "
-        "`execute_python_code` (НЕ новый read_table). Helpers: read_pickle_file, "
+        "`execute_python_code` (НЕ новый load_data). Helpers: read_pickle_file, "
         "describe_pickle_file, rows_to_dataframe, pd, np. Для Python используй `saved_file`; "
         "для filesystem tools (`read_file`, `ls`, `glob`) используй `virtual_file`. Пример:\n"
         f"rows = read_pickle_file(r\"{resolved_path}\")\n"
@@ -255,20 +255,20 @@ def _build_inline_saved_file_note(
     rows: list[dict[str, Any]],
     query_metadata: dict[str, Any] | None = None,
 ) -> str:
-    """Дополняет inline-ответ пометкой о pkl для переиспользования без повторного read_table."""
+    """Дополняет inline-ответ пометкой о pkl для переиспользования без повторного load_data."""
 
     columns = sorted({key for row in rows for key in row})
     resolved_path = file_path.resolve()
     query_note = _format_query_metadata(query_metadata)
     return (
-        "\n\n[Полный результат сохранён в pickle для переиспользования без повторного read_table]\n"
+        "\n\n[Полный результат сохранён в pickle для переиспользования без повторного load_data]\n"
         f"{query_note}"
         f"saved_file: {resolved_path}\n"
         f"virtual_file: {virtual_path}\n"
         f"Строк в файле: {len(rows)}; колонок: {len(columns)}.\n"
         f"Колонки: {', '.join(map(str, columns))}.\n"
         "Если следующий шаг — урезанная выборка из ЭТОГО же набора (другие фильтры, подмножество "
-        "строк, агрегация, уникальные значения), НЕ запускай новый read_table: отфильтруй через "
+        "строк, агрегация, уникальные значения), НЕ запускай новый load_data: отфильтруй через "
         "`execute_python_code` (`read_pickle_file` → `rows_to_dataframe` / pandas).\n"
         f"Пример: rows = read_pickle_file(r\"{resolved_path}\")\n"
     )

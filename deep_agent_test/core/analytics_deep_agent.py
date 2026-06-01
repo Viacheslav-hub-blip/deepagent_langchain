@@ -14,6 +14,13 @@ subagents -> custom tools -> ``create_deep_agent``).
 - Внутренний critic: включается флагом ``enable_retrieval_critic`` (см. шаг 5). При
   ``false`` critic не подключается и не влияет на сборку.
 - Новые subagents: расширь ``build_analytics_subagent_specs`` в ``retrieval_subagents.py``.
+
+Служебные функции:
+- build_data_tools: сборка инструментов чтения данных через фабрику из настроек.
+- _load_callable_from_path: импорт callable по строковому пути.
+- _normalize_data_tools: проверка и нормализация списка инструментов.
+- build_analytics_deep_agent: сборка supervisor и subagents.
+- build_skills_backend: сборка backend для skills и tool outputs.
 """
 
 from __future__ import annotations
@@ -38,12 +45,17 @@ from deep_agent_test.core.retrieval_subagents import build_analytics_subagent_sp
 from deep_agent_test.tools.data_tools_wrapper import wrap_data_tools_with_query_code
 from deep_agent_test.tools.execute_python_code import build_execute_python_code_tool
 from deep_agent_test.tools.load_skills import build_load_skills_tool
-from deep_agent_test.core.prompts import SYSTEM_PROMPT
+from deep_agent_test.core.prompts import (
+    BUILTIN_TOOLS_PROMPT_APPEND_RU,
+    RUSSIAN_TOOL_DESCRIPTION_OVERRIDES,
+    SYSTEM_PROMPT,
+)
 from deep_agent_test.core.python_sandbox import build_python_sandbox
 from deep_agent_test.core.settings import DeepAgentSettings, load_deep_agent_settings
 from deep_agent_test.middlewares.skills_context import PreloadedSkillsContextMiddleware
 from deep_agent_test.middlewares.tool_loop_guard import ToolLoopGuardMiddleware
 from deep_agent_test.middlewares.tool_output_file import ToolOutputFileMiddleware
+from deep_agent_test.middlewares.tool_descriptions import PromptToolDescriptionsMiddleware
 
 
 def build_data_tools(settings: DeepAgentSettings | None = None) -> list[BaseTool]:
@@ -111,7 +123,7 @@ def build_analytics_deep_agent(
 
     1. Settings — все пороги и пути. Кастомизация: `resources/config/defaults.json`, override-файл
        через env `DEEP_AGENT_CONFIG_PATH`, либо готовый ``settings`` в аргументе.
-    2. Data tools — инструменты чтения данных (`read_table`). Кастомизация: передай свои
+    2. Data tools — инструменты чтения данных (`load_data`). Кастомизация: передай свои
        ``BaseTool`` в ``data_tools`` или укажи фабрику в ``data_tools_factory`` конфига.
     3. Middleware — два custom-механизма (принудительная загрузка skills, offload больших
        tool outputs в pickle) плюс нативные/кастомные middleware:
@@ -200,13 +212,19 @@ def build_analytics_deep_agent(
     tool_loop_guard_middleware = ToolLoopGuardMiddleware(
         max_consecutive_tool_calls=settings.max_consecutive_tool_calls,
     )
-    # 3f. Critic loop cap: ограничивает число циклов task(data-retrieval-critic) внутри
+    # 3f. Prompt-only переопределение descriptions встроенных tools и финальный
+    #     русский блок с приоритетом над англоязычными examples из DeepAgents.
+    tool_descriptions_middleware = PromptToolDescriptionsMiddleware(
+        tool_descriptions=RUSSIAN_TOOL_DESCRIPTION_OVERRIDES,
+        system_prompt_append=BUILTIN_TOOLS_PROMPT_APPEND_RU,
+    )
+    # 3g. Critic loop cap: ограничивает число циклов task(data-retrieval-critic) внутри
     #     data-retrieval-agent, чтобы он не зацикливался на проверках до лимита рекурсии.
     critic_loop_cap_middleware = CriticLoopCapMiddleware(
         critic_subagent_type=DATA_RETRIEVAL_CRITIC_AGENT_NAME,
         max_critic_iterations=settings.max_critic_iterations,
     )
-    # 3g. Бюджет шагов субагента: нативный ModelCallLimitMiddleware ограничивает число
+    # 3h. Бюджет шагов субагента: нативный ModelCallLimitMiddleware ограничивает число
     #     ходов модели внутри одного запуска data-retrieval-agent. По исчерпании лимита
     #     (exit_behavior="end") субагент мягко завершается и возвращает supervisor-у то,
     #     что уже собрал, вместо упора в recursion limit графа.
@@ -220,6 +238,7 @@ def build_analytics_deep_agent(
         context_editing_middleware,
         file_search_middleware,
         tool_loop_guard_middleware,
+        tool_descriptions_middleware,
     ]
     # Supervisor выбирает skills; data-retrieval-agent переиспользует тот же выбор, ограничен
     # лимитом циклов critic и бюджетом шагов на запуск; critic — без skills, без cap и без

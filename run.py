@@ -32,7 +32,7 @@ TOOL_STATUS_LABELS = {
     "write_todos": "Составляю план",
     "load_skills": "Читаю skills",
     "task": "Запускаю subagent",
-    "read_table": "Читаю данные",
+    "load_data": "Читаю данные",
     "execute_python_code": "Анализирую данные",
     "write_file": "Сохраняю файл",
     "edit_file": "Обновляю файл",
