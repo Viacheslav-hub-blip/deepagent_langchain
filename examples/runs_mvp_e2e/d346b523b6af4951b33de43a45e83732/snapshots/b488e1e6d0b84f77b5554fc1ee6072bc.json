@@ -1,8 +1,0 @@
-{
-  "run_id": "d346b523b6af4951b33de43a45e83732",
-  "initial_user_query": "Run branch from UI API",
-  "filesystem_context": {},
-  "ephemeral_recalls": {
-    "branch_context": "Branch node: 61416a629382420e971046cfbacbfda0\nSource run: 143bf11c53354046a8fc3f0bbd790856\nSource node: 8c1f2d4fa46a4feb8b9f82b73de49f84\nRestored artifact refs: f96b943cbdab42a4b91c89a2a7bc88dd"
-  }
-}

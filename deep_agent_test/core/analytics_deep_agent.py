@@ -121,7 +121,7 @@ def build_analytics_deep_agent(
        CriticLoopCapMiddleware (лимит циклов critic — только при включённом critic) и
        нативный ModelCallLimitMiddleware (бюджет ходов одного запуска субагента).
        Кастомизация: пороги в settings; модель выбора skills.
-    4. Backend + permissions — где DeepAgents видит skills и spill-файлы (оба read-only).
+    4. Backend — где DeepAgents видит skills и spill-файлы.
     5. Subagents — `data-retrieval-agent`; внутренний `data-retrieval-critic` подключается
        по флагу ``settings.enable_retrieval_critic`` (при ``false`` субагент отдаёт отчёт
        supervisor-у напрямую). Кастомизация: ``build_analytics_subagent_specs``.
@@ -234,7 +234,7 @@ def build_analytics_deep_agent(
     ]
     critic_middleware = list(base_middleware)
 
-    # Шаг 4. Backend skills/spill-файлов (read-only) и общие permissions supervisor.
+    # Шаг 4. Backend skills/spill-файлов.
     backend = build_skills_backend(settings)
 
     # Шаг 5. Subagent чтения данных с внутренним critic (critic отключается флагом
@@ -262,7 +262,6 @@ def build_analytics_deep_agent(
         subagents=subagents,
         skills=[settings.skills_virtual_dir],
         backend=backend,
-        permissions=build_skills_permissions(settings),
         middleware=supervisor_middleware,
         checkpointer=MemorySaver(),
     )
@@ -297,23 +296,8 @@ def build_skills_backend(settings: DeepAgentSettings | None = None) -> Any:
     )
 
 
-def build_skills_permissions(settings: DeepAgentSettings | None = None) -> list[Any]:
-    """Возвращает permissions для файловой системы supervisor.
-
-    Args:
-        settings: Настройки агента; если ``None`` — загружаются из JSON-конфига.
-
-    Returns:
-        Пустой список permissions: supervisor может читать и изменять skills через
-        стандартные файловые инструменты DeepAgents.
-    """
-
-    return []
-
-
 __all__ = [
     "build_analytics_deep_agent",
     "build_data_tools",
     "build_skills_backend",
-    "build_skills_permissions",
 ]

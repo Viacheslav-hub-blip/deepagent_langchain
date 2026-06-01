@@ -1,6 +1,0 @@
-{
-  "query": "Analyze client-42 behavior from available context",
-  "has_dialog_context": false,
-  "filesystem_context_keys": [],
-  "message_count": 1
-}

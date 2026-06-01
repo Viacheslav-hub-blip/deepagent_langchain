@@ -1,8 +1,0 @@
-{
-  "query": "Run from UI API",
-  "has_dialog_context": true,
-  "filesystem_context_keys": [
-    "dialog_context"
-  ],
-  "message_count": 1
-}

@@ -1,8 +1,0 @@
-{
-  "run_id": "78d56fcf3c324ff0985b4d77745e25f2",
-  "initial_user_query": "Check alternative hypothesis from saved state",
-  "filesystem_context": {},
-  "ephemeral_recalls": {
-    "branch_context": "Branch node: d63a25bc5c7646928132d339aa0b172e\nSource run: 3a6bf560a13c42aebc64784e1e4f4373\nSource node: e04e024943bc45e3a4fb5ac1d079a314\nRestored artifact refs: f04a72e0cb784035a0cb7ef2e06a779c"
-  }
-}

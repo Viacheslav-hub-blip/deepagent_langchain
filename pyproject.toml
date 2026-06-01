@@ -1,36 +1,45 @@
 [project]
-name = "research-agent"
+name = "deep-agent-test"
 version = "0.1.0"
-description = "Planner-first LangGraph research agent backend"
+description = "Аналитический DeepAgent с инструментами чтения данных, skills и sandbox."
 requires-python = ">=3.11"
 dependencies = [
-  "aiofiles>=24.1.0",
-  "langchain-core>=0.3.0",
-  "langchain-gigachat>=0.3.0",
-  "langchain-openai>=0.3.0",
-  "langgraph>=0.2.0",
-  "pandas>=2.0.0",
+  "deepagents>=0.6.3",
+  "langchain>=1.0.0",
+  "langchain-core>=1.4.0",
+  "langgraph>=1.1.11",
   "pydantic>=2.7.0",
-  "pyyaml>=6.0.0",
+  "typing-extensions>=4.12.0",
 ]
 
 [project.optional-dependencies]
-api = [
-  "fastapi>=0.115.0",
-  "uvicorn>=0.30.0",
-]
-dev = [
-  "pytest>=8.0.0",
-]
-deep-agent-test = [
-  "deepagents>=0.6.3",
-  "langchain-core>=1.4.0",
-  "langgraph>=1.1.11",
+data = [
   "pyspark>=3.5.0",
+  "pandas>=2.0.0",
+  "numpy>=1.26.0",
+]
+models = [
+  "langchain-openai>=0.3.0",
+  "langchain-gigachat>=0.3.0",
+]
+analytics = [
+  "matplotlib>=3.8.0",
+  "plotly>=5.20.0",
+  "scipy>=1.11.0",
+  "seaborn>=0.13.0",
+  "scikit-learn>=1.4.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["deep_agent_test*"]
+
+[tool.setuptools.package-data]
+deep_agent_test = [
+  "resources/config/*.json",
+  "resources/skills/**/*.md",
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.ruff]
@@ -39,12 +48,3 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F"]
 ignore = ["E501"]
-
-[tool.ruff.lint.per-file-ignores]
-"examples/*.py" = ["E402"]
-
-[tool.setuptools.packages.find]
-include = ["planner_agent*", "sandbox", "deep_agent_test*"]
-
-[tool.setuptools.package-data]
-deep_agent_test = ["resources/config/*.json", "resources/skills/**/*.md"]

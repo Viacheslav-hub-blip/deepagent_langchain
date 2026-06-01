@@ -1,2 +1,0 @@
-﻿event_description,transaction_amount,main_rule_name,main_rule_description
-Оплата экзамена,34199.48,DENY оплата обучения после смены устройства,Синтетическая сработка по операции: Оплата экзамена

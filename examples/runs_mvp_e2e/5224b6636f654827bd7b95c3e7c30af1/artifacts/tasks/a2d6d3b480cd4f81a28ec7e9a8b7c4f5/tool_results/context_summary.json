@@ -1,8 +1,0 @@
-{
-  "query": "Compare base run and branch run. Which one has stronger evidence?",
-  "has_dialog_context": true,
-  "filesystem_context_keys": [
-    "dialog_context"
-  ],
-  "message_count": 1
-}
