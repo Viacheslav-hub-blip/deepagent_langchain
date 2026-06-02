@@ -182,6 +182,9 @@ deep_agent_test/resources/config/defaults.json
 ## Формат `load_data`
 
 Сложные параметры передаются структурированными списками, а не строковым DSL.
+Для обычной выборки `select_columns` обязателен. Вызов только с `table_name`
+запрещён: `load_data` не выполняет `SELECT *`. Для расчётов вместо `select_columns`
+передавайте `aggregations`.
 
 Пример обычной выборки:
 
@@ -200,7 +203,6 @@ order_by:
 
 ```text
 table_name: cards
-select_columns: []
 filters:
   - {"column": "event_dt", "operator": "between", "values": ["20260101", "20260131"]}
 group_by: ["event_description"]

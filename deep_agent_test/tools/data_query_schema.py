@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 ScalarValue = str | int | float | bool
 FilterOperator = Literal["eq", "ne", "gt", "gte", "lt", "lte", "contains", "in", "between", "is_null", "not_null"]
@@ -111,7 +111,13 @@ class ReadTableInput(BaseModel):
     """
 
     table_name: str = Field(description="Короткое имя таблицы: hits, cards, uko, history_automarking или demo_client_timeline.")
-    select_columns: list[str] = Field(default_factory=list, description="Колонки результата. Не используй '*' и 'all'.")
+    select_columns: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Обязательные колонки результата для обычной выборки. "
+            "Не оставляй пустым без aggregations; не используй '*' и 'all'."
+        ),
+    )
     filters: list[FilterCondition] = Field(default_factory=list, description="Фильтры строк таблицы.")
     derived_columns: list[DerivedColumnSpec] = Field(default_factory=list, description="Вычисляемые колонки.")
     group_by: list[str] = Field(default_factory=list, description="Колонки группировки.")
@@ -119,6 +125,36 @@ class ReadTableInput(BaseModel):
     order_by: list[OrderBySpec] = Field(default_factory=list, description="Правила сортировки результата.")
     max_rows: int | None = Field(default=None, ge=0, description="Максимальное число строк результата.")
     include_schema: bool = Field(default=False, description="Если True, добавить схему результата в metadata.")
+
+    @model_validator(mode="after")
+    def validate_select_or_aggregations(self) -> "ReadTableInput":
+        """Проверяет, что обычная выборка не превращается в неявный ``SELECT *``.
+
+        Args:
+            Отсутствуют. Метод использует поля текущей модели.
+
+        Returns:
+            Текущую модель, если указан явный список колонок или агрегаты.
+
+        Raises:
+            ValueError: Вызов ``load_data`` не содержит ни ``select_columns``, ни ``aggregations``.
+        """
+
+        normalized_select_columns = [str(column).strip() for column in self.select_columns if str(column).strip()]
+        forbidden_columns = {column.lower() for column in normalized_select_columns} & {"*", "all"}
+        if forbidden_columns:
+            raise ValueError(
+                "select_columns не может содержать '*' или 'all'. "
+                "Укажи минимальный список конкретных колонок результата."
+            )
+        has_select_columns = bool(normalized_select_columns)
+        has_aggregations = bool(self.aggregations)
+        if not has_select_columns and not has_aggregations:
+            raise ValueError(
+                "Для load_data обязательно укажи select_columns или aggregations. "
+                "Вызов только с table_name запрещён, потому что SELECT * не поддерживается."
+            )
+        return self
 
 
 __all__ = [

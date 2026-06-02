@@ -23,6 +23,7 @@
 - _parse_scalar: приведение строкового значения к простому типу.
 - _coerce_filter_value: приведение значения фильтра к типу pandas Series.
 - _validate_columns: проверка наличия колонок в DataFrame.
+- _format_empty_select_error: человекочитаемая ошибка для пустой обычной выборки.
 - _format_missing_columns: человекочитаемая ошибка по отсутствующим колонкам.
 - _get_field: чтение поля из dict или pydantic-модели.
 """
@@ -68,6 +69,7 @@ FAKE_READ_TABLE_DESCRIPTION = (
     "В table_name принимает только короткие alias таблиц: hits, cards, uko, "
     "history_automarking или demo_client_timeline. "
     "Сложные параметры передаются структурированными списками объектов, а не строковым DSL. "
+    "Обычная выборка без явного select_columns запрещена: инструмент не выполняет SELECT *. "
     "Инструмент временный, использует хардкод таблиц и не должен встраиваться "
     "в production-логику проекта."
 )
@@ -724,12 +726,43 @@ def _validate_columns(*, columns: list[str], available_columns: list[str], allow
 
     normalized = [column for column in columns if column]
     if not normalized and not allow_empty:
-        return "Ошибка load_data: нужно явно указать select_columns или aggregations. '*' и 'all' запрещены."
+        return _format_empty_select_error()
     forbidden = {column.lower() for column in normalized} & {"*", "all"}
     if forbidden:
-        return "Ошибка load_data: нельзя запрашивать все поля. Укажи минимально нужные колонки."
+        return (
+            "Ошибка load_data: нельзя запрашивать все поля через '*' или 'all'.\n"
+            "Исправление: укажи минимальный список select_columns из skills или schema.\n"
+            "Пример точечного поиска: table_name='hits', "
+            "select_columns=['event_id', 'event_dt', 'event_time'], "
+            "filters=[{'column': 'event_id', 'operator': 'eq', 'value': '<event_id>'}], "
+            "max_rows=1."
+        )
     missing = sorted({column for column in normalized if column not in set(available_columns)})
     return _format_missing_columns(missing=missing, available_columns=available_columns) if missing else ""
+
+
+def _format_empty_select_error() -> str:
+    """Формирует точечную ошибку для вызова ``load_data`` без колонок результата.
+
+    Args:
+        Отсутствуют.
+
+    Returns:
+        Текст ошибки с шаблонами исправленного вызова.
+    """
+
+    return (
+        "Ошибка load_data: обычная выборка без select_columns запрещена. "
+        "Инструмент не выполняет SELECT * и не принимает вызов только с table_name.\n"
+        "Исправление для чтения строк: добавь select_columns с минимально нужными полями "
+        "и, если есть ключ из задачи, добавь filters.\n"
+        "Пример точечного поиска по event_id: table_name='hits', "
+        "select_columns=['event_id', 'event_dt', 'event_time'], "
+        "filters=[{'column': 'event_id', 'operator': 'eq', 'value': '<event_id>'}], "
+        "max_rows=1.\n"
+        "Исправление для расчёта: вместо select_columns передай aggregations, например "
+        "[{'function': 'count', 'column': 'event_id', 'alias': 'events_count'}]."
+    )
 
 
 def _format_missing_columns(*, missing: list[str], available_columns: list[str]) -> str:
@@ -746,7 +779,9 @@ def _format_missing_columns(*, missing: list[str], available_columns: list[str])
     return (
         "Ошибка load_data: в таблице нет колонок из запроса.\n"
         f"Отсутствующие поля: {', '.join(missing)}.\n"
-        f"Доступные поля ({len(available_columns)}): {', '.join(available_columns)}."
+        f"Доступные поля ({len(available_columns)}): {', '.join(available_columns)}.\n"
+        "Исправление: выбери существующие поля из списка выше или проверь нужную таблицу "
+        "по skills; не повторяй тот же набор отсутствующих колонок."
     )
 
 

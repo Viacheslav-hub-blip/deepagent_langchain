@@ -21,6 +21,7 @@
 - _parse_order_item: разбор одной сортировки.
 - _parse_scalar: приведение строкового значения к простому типу.
 - _validate_columns: проверка наличия колонок в DataFrame.
+- _format_empty_select_error: человекочитаемая ошибка для пустой обычной выборки.
 - _format_missing_columns: человекочитаемая ошибка по отсутствующим колонкам.
 - _get_field: чтение поля из dict или pydantic-модели.
 """
@@ -41,13 +42,14 @@ READ_TABLE_DESCRIPTION = (
     "Инструмент принимает имя таблицы, список полей, структурированные фильтры, "
     "вычисляемые колонки, группировки, агрегации, сортировку и лимит строк. "
     "При успешной выборке возвращает pandas DataFrame.\n"
-    "Выгрузка всех столбцов запрещена: агент должен явно указать минимально "
-    "достаточный набор колонок.\n\n"
+    "Выгрузка всех столбцов запрещена: обычная выборка без явного select_columns "
+    "не выполняется. Агент должен указать минимально достаточный набор колонок "
+    "или использовать aggregations.\n\n"
     "Параметры:\n"
     "  table_name (str, обяз.) - короткий alias таблицы: hits, cards, uko, "
     "history_automarking или demo_client_timeline. Не передавай полное Spark-имя.\n"
-    "  select_columns (list[str]) - поля результата. Пустой список, '*' и 'all' "
-    "запрещены, если нет aggregations.\n"
+    "  select_columns (list[str]) - обязательные поля результата для обычной "
+    "выборки. Пустой список, '*' и 'all' запрещены, если нет aggregations.\n"
     "  filters (list[object]) - фильтры вида {column, operator, value} или "
     "{column, operator, values}. Операторы: eq, ne, gt, gte, lt, lte, contains, "
     "in, between, is_null, not_null.\n"
@@ -688,12 +690,43 @@ def _validate_columns(*, columns: list[str], available_columns: list[str], allow
 
     normalized = [column for column in columns if column]
     if not normalized and not allow_empty:
-        return "Ошибка load_data: нужно явно указать select_columns или aggregations. '*' и 'all' запрещены."
+        return _format_empty_select_error()
     forbidden = {column.lower() for column in normalized} & {"*", "all"}
     if forbidden:
-        return "Ошибка load_data: нельзя запрашивать все поля. Укажи минимально нужные колонки."
+        return (
+            "Ошибка load_data: нельзя запрашивать все поля через '*' или 'all'.\n"
+            "Исправление: укажи минимальный список select_columns из skills или schema.\n"
+            "Пример точечного поиска: table_name='hits', "
+            "select_columns=['event_id', 'event_dt', 'event_time'], "
+            "filters=[{'column': 'event_id', 'operator': 'eq', 'value': '<event_id>'}], "
+            "max_rows=1."
+        )
     missing = sorted({column for column in normalized if column not in set(available_columns)})
     return _format_missing_columns(missing=missing, available_columns=available_columns) if missing else ""
+
+
+def _format_empty_select_error() -> str:
+    """Формирует точечную ошибку для вызова ``load_data`` без колонок результата.
+
+    Args:
+        Отсутствуют.
+
+    Returns:
+        Текст ошибки с шаблонами исправленного вызова.
+    """
+
+    return (
+        "Ошибка load_data: обычная выборка без select_columns запрещена. "
+        "Инструмент не выполняет SELECT * и не принимает вызов только с table_name.\n"
+        "Исправление для чтения строк: добавь select_columns с минимально нужными полями "
+        "и, если есть ключ из задачи, добавь filters.\n"
+        "Пример точечного поиска по event_id: table_name='hits', "
+        "select_columns=['event_id', 'event_dt', 'event_time'], "
+        "filters=[{'column': 'event_id', 'operator': 'eq', 'value': '<event_id>'}], "
+        "max_rows=1.\n"
+        "Исправление для расчёта: вместо select_columns передай aggregations, например "
+        "[{'function': 'count', 'column': 'event_id', 'alias': 'events_count'}]."
+    )
 
 
 def _format_missing_columns(*, missing: list[str], available_columns: list[str]) -> str:
@@ -710,7 +743,9 @@ def _format_missing_columns(*, missing: list[str], available_columns: list[str])
     return (
         "Ошибка load_data: в таблице нет колонок из запроса.\n"
         f"Отсутствующие поля: {', '.join(missing)}.\n"
-        f"Доступные поля ({len(available_columns)}): {', '.join(available_columns)}."
+        f"Доступные поля ({len(available_columns)}): {', '.join(available_columns)}.\n"
+        "Исправление: выбери существующие поля из списка выше или проверь нужную таблицу "
+        "по skills; не повторяй тот же набор отсутствующих колонок."
     )
 
 
