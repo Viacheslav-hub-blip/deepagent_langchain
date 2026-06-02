@@ -57,7 +57,7 @@ def main() -> int:
     trace_file_path = build_trace_file_path(settings.trace_log_dir)
     trace_handler = FileTraceCallbackHandler(trace_file_path)
     result = agent.invoke(
-        {"messages": [{"role": "user", "content": USER_MESSAGE_2}]},
+        {"messages": [{"role": "user", "content": USER_MESSAGE}]},
         config={
             "callbacks": [trace_handler],
             "configurable": {"thread_id": settings.thread_id},
@@ -95,7 +95,7 @@ def main_stream() -> int:
     print("Запускаю агента...")
     final_result = None
     stream = agent.stream_events(
-        {"messages": [{"role": "user", "content": USER_MESSAGE_4}]},
+        {"messages": [{"role": "user", "content": USER_MESSAGE_3}]},
         config=config,
         version="v3",
     )

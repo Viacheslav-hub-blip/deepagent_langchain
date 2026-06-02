@@ -21,12 +21,20 @@ subagents -> custom tools -> ``create_deep_agent``).
 - _normalize_data_tools: проверка и нормализация списка инструментов.
 - build_analytics_deep_agent: сборка supervisor и subagents.
 - build_skills_backend: сборка backend для skills и tool outputs.
+- create_session_tool_outputs_dir: создание папки tool outputs для одного запуска.
+- register_session_tool_outputs_cleanup: регистрация удаления tool outputs при закрытии агента.
+- cleanup_session_tool_outputs_dir: удаление папки tool outputs одного запуска.
 """
 
 from __future__ import annotations
 
 import importlib
+import atexit
+import shutil
+import uuid
+import weakref
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from deepagents import create_deep_agent
@@ -152,6 +160,7 @@ def build_analytics_deep_agent(
 
     # Шаг 1. Настройки: пути skills, папка spill-файлов, пороги offload, thread_id.
     settings = settings or load_deep_agent_settings()
+    session_tool_outputs_dir = create_session_tool_outputs_dir(settings.tool_outputs_dir)
 
     # Шаг 2. Инструменты чтения данных. Аргумент имеет приоритет над фабрикой из конфига.
     # Оборачиваем их в слой прозрачности: агент получает сгенерированный код запроса и
@@ -184,7 +193,7 @@ def build_analytics_deep_agent(
     )
     # 3b. Offload больших табличных tool outputs в pickle, чтобы не раздувать контекст.
     tool_output_file_middleware = ToolOutputFileMiddleware(
-        output_dir=settings.tool_outputs_dir,
+        output_dir=session_tool_outputs_dir,
         min_rows_to_save=settings.tool_output_min_rows_to_save,
         min_content_chars_to_save=settings.tool_output_min_content_chars_to_save,
         preview_rows=settings.tool_output_preview_rows,
@@ -202,9 +211,8 @@ def build_analytics_deep_agent(
     )
     # 3d. File search: glob/grep поиск по папке spill-файлов (.pkl). Папку создаём заранее,
     #     чтобы root_path существовал. use_ripgrep=False не требует бинарника rg на хосте.
-    settings.tool_outputs_dir.mkdir(parents=True, exist_ok=True)
     file_search_middleware = FilesystemFileSearchMiddleware(
-        root_path=str(settings.tool_outputs_dir),
+        root_path=str(session_tool_outputs_dir),
         use_ripgrep=settings.file_search_use_ripgrep,
     )
     # 3e. Loop guard: блокирует серию подряд идущих вызовов одного tool после N повторов
@@ -254,7 +262,7 @@ def build_analytics_deep_agent(
     critic_middleware = list(base_middleware)
 
     # Шаг 4. Backend skills/spill-файлов.
-    backend = build_skills_backend(settings)
+    backend = build_skills_backend(settings, tool_outputs_dir=session_tool_outputs_dir)
 
     # Шаг 5. Subagent чтения данных с внутренним critic (critic отключается флагом
     # settings.enable_retrieval_critic — тогда subagent отдаёт отчёт supervisor-у напрямую).
@@ -274,7 +282,7 @@ def build_analytics_deep_agent(
     load_skills_tool = build_load_skills_tool(settings)
 
     # Шаг 7. Финальная сборка DeepAgents supervisor.
-    return create_deep_agent(
+    agent = create_deep_agent(
         model=model,
         tools=[python_tool, load_skills_tool],
         system_prompt=SYSTEM_PROMPT,
@@ -284,13 +292,20 @@ def build_analytics_deep_agent(
         middleware=supervisor_middleware,
         checkpointer=MemorySaver(),
     )
+    register_session_tool_outputs_cleanup(agent, session_tool_outputs_dir)
+    return agent
 
 
-def build_skills_backend(settings: DeepAgentSettings | None = None) -> Any:
+def build_skills_backend(
+    settings: DeepAgentSettings | None = None,
+    tool_outputs_dir: Path | None = None,
+) -> Any:
     """Собирает CompositeBackend: state по умолчанию + read-only skills и tool_outputs.
 
     Args:
         settings: Настройки агента; если ``None`` — загружаются из JSON-конфига.
+        tool_outputs_dir: Папка tool outputs текущего запуска. Если ``None``, используется
+            базовая папка из настроек.
 
     Returns:
         ``CompositeBackend`` с маршрутами на локальные папки skills и spill-файлов.
@@ -299,6 +314,7 @@ def build_skills_backend(settings: DeepAgentSettings | None = None) -> Any:
     from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
 
     settings = settings or load_deep_agent_settings()
+    resolved_tool_outputs_dir = tool_outputs_dir or settings.tool_outputs_dir
     tool_outputs_virtual = "/tool_outputs/"
     return CompositeBackend(
         default=StateBackend(),
@@ -308,15 +324,68 @@ def build_skills_backend(settings: DeepAgentSettings | None = None) -> Any:
                 virtual_mode=True,
             ),
             tool_outputs_virtual: FilesystemBackend(
-                root_dir=settings.tool_outputs_dir,
+                root_dir=resolved_tool_outputs_dir,
                 virtual_mode=True,
             ),
         },
     )
 
 
+def create_session_tool_outputs_dir(base_dir: Path) -> Path:
+    """Создаёт отдельную папку tool outputs для одного запуска агента.
+
+    Args:
+        base_dir: Базовая директория, внутри которой создаётся session-подкаталог.
+
+    Returns:
+        Абсолютный путь к созданной папке текущего запуска.
+    """
+
+    base_dir.mkdir(parents=True, exist_ok=True)
+    session_dir = base_dir / f"session_{uuid.uuid4().hex}"
+    session_dir.mkdir(parents=True, exist_ok=False)
+    return session_dir.resolve()
+
+
+def register_session_tool_outputs_cleanup(agent: Any, session_dir: Path) -> None:
+    """Регистрирует удаление pickle-файлов текущего запуска при уничтожении агента.
+
+    Args:
+        agent: Собранный граф агента, жизненный цикл которого ограничивает session.
+        session_dir: Папка tool outputs текущего запуска.
+
+    Returns:
+        ``None``. Очистка выполняется через ``weakref.finalize`` при сборке мусора или
+        завершении процесса Python.
+    """
+
+    try:
+        weakref.finalize(agent, cleanup_session_tool_outputs_dir, session_dir)
+    except TypeError:
+        atexit.register(cleanup_session_tool_outputs_dir, session_dir)
+
+
+def cleanup_session_tool_outputs_dir(session_dir: Path) -> None:
+    """Удаляет папку tool outputs одного запуска.
+
+    Args:
+        session_dir: Папка текущего запуска, имя которой должно начинаться с ``session_``.
+
+    Returns:
+        ``None``. Если путь не похож на session-папку, функция ничего не удаляет.
+    """
+
+    resolved = session_dir.resolve()
+    if not resolved.name.startswith("session_"):
+        return
+    shutil.rmtree(resolved, ignore_errors=True)
+
+
 __all__ = [
     "build_analytics_deep_agent",
     "build_data_tools",
     "build_skills_backend",
+    "cleanup_session_tool_outputs_dir",
+    "create_session_tool_outputs_dir",
+    "register_session_tool_outputs_cleanup",
 ]

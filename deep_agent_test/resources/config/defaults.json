@@ -5,7 +5,7 @@
   "data_tools_factory": null,
   "data_tools_factory_kwargs": {},
   "tool_outputs_dir": "runs/deep_agent_tool_outputs",
-  "max_chars_per_skill": 40000,
+  "max_chars_per_skill": 12000,
   "tool_output_min_rows_to_save": 30,
   "tool_output_min_content_chars_to_save": 60000,
   "tool_output_preview_rows": 30,

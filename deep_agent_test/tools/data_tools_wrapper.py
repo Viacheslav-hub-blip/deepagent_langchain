@@ -195,10 +195,10 @@ def _build_query_code(kwargs: dict[str, Any]) -> str:
     table_name = _get(kwargs, "table_name") or "<table>"
     select_columns = _parse_columns(_get(kwargs, "select_columns"))
     group_by = _parse_columns(_get(kwargs, "group_by"))
-    aggregations = _split_instruction_text(_get(kwargs, "aggregations"))
+    aggregations = _format_aggregations(_get(kwargs, "aggregations"))
     filters = _get(kwargs, "filters")
-    derived_columns = _split_instruction_text(_get(kwargs, "derived_columns"))
-    order_by = _split_instruction_text(_get(kwargs, "order_by"))
+    derived_columns = _format_derived_columns(_get(kwargs, "derived_columns"))
+    order_by = _format_order_by(_get(kwargs, "order_by"))
     max_rows = _get(kwargs, "max_rows")
 
     if aggregations:
@@ -226,7 +226,7 @@ def _build_query_code(kwargs: dict[str, Any]) -> str:
 
 
 def _build_where_clause(filters: Any) -> str:
-    """Преобразует строковые фильтры в SQL-подобное условие WHERE."""
+    """Преобразует фильтры в SQL-подобное условие WHERE."""
 
     predicates = [_build_predicate(filter_item) for filter_item in _split_instruction_text(filters)]
     return " AND ".join(predicate for predicate in predicates if predicate)
@@ -242,6 +242,11 @@ def _build_predicate(filter_item: Any) -> str:
     operator = _get(filter_item, "operator") or "eq"
     value = _get(filter_item, "value")
     values = _as_list(_get(filter_item, "values"))
+    second_value = _get(filter_item, "second_value")
+    if operator == "in" and not values and value is not None:
+        values = [value]
+    if operator == "between" and not values:
+        values = [item for item in (value, second_value) if item is not None]
 
     if operator == "is_null":
         return f"{column} IS NULL"
@@ -255,6 +260,54 @@ def _build_predicate(filter_item: Any) -> str:
         return f"{column} LIKE {_literal(f'%{value}%')}"
     sql_operator = {"eq": "=", "ne": "<>", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}.get(operator, operator)
     return f"{column} {sql_operator} {_literal(value)}"
+
+
+def _format_derived_columns(value: Any) -> list[str]:
+    """Форматирует вычисляемые колонки для SQL-подобного вывода."""
+
+    result: list[str] = []
+    for item in _split_instruction_text(value):
+        if isinstance(item, str):
+            result.append(item)
+            continue
+        name = _get(item, "name")
+        source_column = _get(item, "source_column")
+        operation = _get(item, "operation")
+        if name and source_column and operation:
+            result.append(f"{name} = {operation}({source_column})")
+    return result
+
+
+def _format_aggregations(value: Any) -> list[str]:
+    """Форматирует агрегаты для SQL-подобного вывода."""
+
+    result: list[str] = []
+    for item in _split_instruction_text(value):
+        if isinstance(item, str):
+            result.append(item)
+            continue
+        function = _get(item, "function")
+        column = _get(item, "column")
+        alias = _get(item, "alias")
+        if function and column:
+            expression = f"{function}({column})"
+            result.append(f"{expression} AS {alias}" if alias else expression)
+    return result
+
+
+def _format_order_by(value: Any) -> list[str]:
+    """Форматирует правила сортировки для SQL-подобного вывода."""
+
+    result: list[str] = []
+    for item in _split_instruction_text(value):
+        if isinstance(item, str):
+            result.append(item)
+            continue
+        column = _get(item, "column")
+        direction = _get(item, "direction") or "asc"
+        if column:
+            result.append(f"{column} {direction}")
+    return result
 
 
 def _literal(value: Any) -> str:
@@ -279,13 +332,13 @@ def _parse_columns(value: Any) -> list[str]:
     return [part.strip() for part in str(value).split(",") if part.strip()]
 
 
-def _split_instruction_text(value: Any) -> list[str]:
-    """Разбирает строку инструкций через ``;`` или перенос строки."""
+def _split_instruction_text(value: Any) -> list[Any]:
+    """Разбирает строку инструкций или возвращает список структурированных объектов."""
 
     if not value:
         return []
     if isinstance(value, (list, tuple)):
-        return [str(item).strip() for item in value if str(item).strip()]
+        return [item for item in value if item]
     normalized = str(value).replace("\n", ";")
     return [part.strip() for part in normalized.split(";") if part.strip()]
 

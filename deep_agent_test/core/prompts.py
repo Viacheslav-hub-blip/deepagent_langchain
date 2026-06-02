@@ -394,11 +394,25 @@ _DATA_RETRIEVAL_PROMPT_CORE = """
 ## load_data
 
 Используй только `load_data`. При вызове передавай:
-- `table_name` — точное имя таблицы или alias из контекста;
-- `select_columns` — явный минимально достаточный список подтверждённых колонок;
-- `filters` — конкретные фильтры (без плейсхолдеров);
+- `table_name` — только короткий alias таблицы из skills (`hits`, `cards`, `uko`,
+  `history_automarking`, `demo_client_timeline`); полные Spark-имена, пути и view
+  запрещены, инструмент сам подставит внутреннее имя источника;
+  запрещено передавать сюда `saved_file`, `virtual_file`, путь к `.pkl`, путь к файлу,
+  имя artifact или строку, похожую на имя выгрузки. Если значение содержит `.pkl`,
+  `/tool_outputs/`, `runs/`, `:\`, `.parquet`, `.avro`, `.json.gz` или длинный UUID,
+  это не таблица, а сохранённый результат; его нужно обрабатывать через
+  `execute_python_code`, а не через `load_data`.
+- `select_columns` — массив подтверждённых колонок, например
+  `["event_id", "event_dt", "age_category"]`;
+- `filters` — массив объектов без плейсхолдеров, например
+  `[{"column": "event_dt", "operator": "between", "values": ["20260101", "20260131"]}]`;
 - `include_schema=true` и `max_rows=0` — для проверки доступных колонок;
-- `group_by` / `aggregations` / `order_by` / `derived_columns` — только по подтверждённым полям.
+- `group_by` — массив колонок группировки;
+- `aggregations` — массив объектов вида
+  `{"function": "count", "column": "event_id", "alias": "hits_count"}`;
+- `order_by` — массив объектов вида `{"column": "hits_count", "direction": "desc"}`;
+- `derived_columns` — массив объектов вида
+  `{"name": "event_month", "source_column": "event_dt", "operation": "year_month"}`.
 
 Операторы фильтров: eq, ne, gt, gte, lt, lte, contains, in, between, is_null, not_null.
 Функции агрегаций: count, count_distinct, min, max, sum, mean.

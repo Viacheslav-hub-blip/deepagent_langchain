@@ -1,112 +1,71 @@
 ---
 name: hit-table
-description: "Сработки антифрода: решения, правила, резолюции, save-флаги, жалобы и краткий контекст событий до/после."
+description: "Краткая карточка источника hits: сработки антифрода, правила, решения, save/fp, жалобы и связь с raw-таблицами."
 ---
 
-# Таблица сработок
+# Таблица сработок hits
 
-Источник: `cspfs_repo_features3.hits_extra_info_129372427_view`.
+Источник для `load_data`: `hits`.
 
-Смысл: сработки антифрод-мониторинга — решения, правила, резолюции, признаки предотвращённого мошенничества, жалобы, краткий контекст событий до/после. Основная точка входа для поиска alert/hit-событий. Не полная транзакционная история клиента.
+Когда использовать:
 
-Зерно: одна строка = одна сработка / hit-событие.
+- пользователь спрашивает про сработки, алерты, hit-события, правила антифрода;
+- нужны `policy_action`, `main_rule`, резолюции, save/fp, жалобы;
+- нужно найти событие по `event_id`;
+- нужно начать маршрут к raw-истории клиента через `cards` или `uko`.
 
-## Ключи связи
+Зерно: одна строка = одна сработка антифрод-мониторинга. Это не полная транзакционная история клиента.
 
-- `event_id` - id сработки; может совпадать с `event_id` в `cards_event` / `uko_event`.
-- `epk_id` - клиентский ключ для связи, когда совпадения по `event_id` нет.
-- `event_dt` (`YYYYMMDD`) - предпочтительное поле фильтрации и связи с raw-таблицами.
-- `event_channel`, `sub_channel`, `event_type`, `sub_type`, `type_operation` - подсказывают, в какой raw-таблице лежит детальная запись.
+## Ключи
 
-## Связывание с raw-таблицами (cards_event / uko_event)
+- `event_id` - id сработки; может совпадать с `event_id` в `cards` или `uko`.
+- `epk_id` - клиентский ключ для fallback-связи.
+- `event_dt` - дата события в формате `YYYYMMDD`; основной фильтр периода.
+- `event_channel`, `sub_channel`, `event_type`, `sub_type`, `type_operation` - признаки для выбора raw-таблицы.
 
-1. Сначала по `event_id`, если он есть в hits.
-2. Для дневного сопоставления и fallback — по `event_dt`, а не по точному `event_time`.
-3. `event_dt` передавай как `YYYYMMDD` (`20260124`), без преобразования в ISO.
-4. Не добавляй фильтр `event_time = <значение из hits>` для `uko_event` — там другой формат хранения.
-5. Точность по времени в `uko_event` — через `event_dttm_readable`, а не `event_time`.
+## Главные поля
+
+- `event_id`
+- `event_dt`
+- `event_time`
+- `epk_id`
+- `user_id`
+- `fio`
+- `event_description`
+- `transaction_amount`
+- `transaction_amount_in_rub`
+- `event_channel`
+- `sub_channel`
+- `event_type`
+- `sub_type`
+- `type_operation`
+- `policy_action`
+- `main_rule`
+- `resolution_first`
+- `resolution_last`
+- `has_claim`
+- `is_save`
+- `marked_as_not_save_reason`
+- `previous_events`
+- `posterious_events`
 
 ## Ограничения
 
-- Нет полей геолокации по IP — геоданные ищи в raw-таблицах событий.
-- `event_time` здесь читаемый (`YYYY-MM-DD HH:MM:SS`); не копируй как фильтр в `uko_event`.
+- Не ищи IP/гео в `hits`; для этого переходи в raw-таблицы `cards` или `uko`.
+- Не копируй `hits.event_time` как фильтр для `uko.event_time`: в `uko` другой формат времени.
+- Для периода используй `event_dt`, а не преобразованный ISO.
 
-## Поля
+## Дополнительный контекст
 
-```text
-index
-event_time
-event_id
-transaction_amount
-transaction_amount_in_rub
-client_balance
-transaction_amount_currency
-event_channel
-sub_channel
-event_type
-sub_type
-type_operation
-event_description
-tree_info
-policy_action
-main_rule
-epk_id
-user_id
-fio
-segment
-age
-age_category
-phone
-phone_operator
-region_phone_operator
-dul_number
-dul_type
-payer_inn
-card_number
-transaction_sender_account_number
-p2p_sender_account_number
-payer_account_number
-payer_card_number
-mobile_phone_number
-payer_transfer_type
-payee_transfer_type
-transaction_beneficiar_account_number
-recipient_bik
-payee_bank_name
-member_id
-sbp_id
-operation_id
-recipient_info
-card_info
-trust_info
-recipient_inn
-atm_merchant_name
-merchant_info
-pos_info
-link_cf
-mobile_sdk_info
-scoring_oss
-type_accept
-source_type_accept
-resolution_first
-resolution_first_dttm
-resolution_last
-resolution_last_dttm
-accept_time_sec
-purpose
-surface
-product
-product_type
-payment_transaction_flag
-has_claim
-is_save
-marked_as_not_save_reason
-posterious_events
-previous_events
-hits_extra_facts
-posterious_events_additional_info
-previous_events_additional_info
-own_loading_id
-own_dt
-event_dt
-```
+Читай дополнительные файлы только если краткой карточки недостаточно:
+
+- `/skills/hit-table/fields.md` - полный список полей `hits` и краткие описания.
+- `/skills/hit-table/joins.md` - правила связи `hits` с `cards` и `uko`.
+
+Триггеры для чтения `/skills/hit-table/fields.md`:
+
+- нужно выбрать редкое поле;
+- пользователь спрашивает смысл поля;
+- `load_data` вернул schema error;
+- нужен широкий список колонок для выгрузки.
+

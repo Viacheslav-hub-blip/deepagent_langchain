@@ -5,9 +5,10 @@
   tool calls и tool results без служебных metadata.
 - build_trace_file_path: построение пути к trace-файлу запуска.
 - _message_content: извлечение текстового содержимого сообщения.
+- _message_role: определение роли сообщения для trace-лога.
+- _estimate_token_count: грубая оценка числа токенов по длине текста.
 - _extract_tool_specs: нормализация описаний tools из параметров вызова модели.
 - _format_json: безопасное форматирование структур в JSON.
-- _normalize_tool_signature: компактная сигнатура набора tools для дедупликации.
 - _first_generation_message: извлечение первого сообщения из результата LLM.
 - _tool_result_name: извлечение имени tool из результата.
 - _tool_result_content: извлечение содержимого результата tool.
@@ -51,9 +52,8 @@ class FileTraceCallbackHandler(BaseCallbackHandler):
         self.file_path = Path(file_path)
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
         self.file_path.write_text("", encoding="utf-8")
-        self._last_system_prompt: str | None = None
-        self._last_tools_signature: str | None = None
         self._tool_names_by_run_id: dict[str, str] = {}
+        self._model_call_index = 0
 
     def on_chat_model_start(
         self,
@@ -76,11 +76,13 @@ class FileTraceCallbackHandler(BaseCallbackHandler):
         """
 
         del serialized, kwargs
+        self._model_call_index += 1
+        request_index = self._model_call_index
         batch = messages[0] if messages else []
         tools = _extract_tool_specs((invocation_params or {}).get("tools"))
-        self._append_section("MODEL STEP", datetime.now().isoformat(timespec="seconds"))
-        self._append_tools(tools)
-        self._append_prompt_messages(batch)
+        self._append_llm_request_header(request_index=request_index, messages=batch, tools=tools)
+        self._append_tools(tools, request_index=request_index)
+        self._append_prompt_messages(batch, request_index=request_index)
 
     def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
         """Логирует ответ модели и запрошенные ею вызовы инструментов.
@@ -160,54 +162,124 @@ class FileTraceCallbackHandler(BaseCallbackHandler):
         content = _tool_result_content(output)
         self._append_section("TOOL RESULT", "\n".join([f"name: {tool_name}", "content:", content]))
 
-    def _append_prompt_messages(self, messages: list[BaseMessage]) -> None:
-        """Записывает system/user сообщения из входа модели.
+    def _append_llm_request_header(
+        self,
+        *,
+        request_index: int,
+        messages: list[BaseMessage],
+        tools: list[dict[str, Any]],
+    ) -> None:
+        """Записывает явную границу одного запроса к LLM и сводку объёма контекста.
+
+        Args:
+            request_index: Порядковый номер model call внутри текущего trace.
+            messages: Полный список сообщений, переданный модели.
+            tools: Нормализованный список tools, доступных модели в этом вызове.
+
+        Returns:
+            ``None``. Метод добавляет в trace заголовок запроса и таблицу размеров.
+        """
+
+        message_rows: list[str] = []
+        message_chars_total = 0
+        message_tokens_total = 0
+        for index, message in enumerate(messages, start=1):
+            content = _message_content(message)
+            chars = len(content)
+            tokens = _estimate_token_count(content)
+            message_chars_total += chars
+            message_tokens_total += tokens
+            tool_calls = len(getattr(message, "tool_calls", []) or [])
+            message_rows.append(
+                " | ".join(
+                    [
+                        str(index),
+                        _message_role(message),
+                        message.__class__.__name__,
+                        str(chars),
+                        str(tokens),
+                        str(tool_calls),
+                        str(getattr(message, "name", "") or ""),
+                    ]
+                )
+            )
+
+        tools_text = _format_json(tools)
+        tool_chars = len(tools_text)
+        tool_tokens = _estimate_token_count(tools_text)
+        body = "\n".join(
+            [
+                f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
+                f"messages_count: {len(messages)}",
+                f"tools_count: {len(tools)}",
+                f"messages_chars: {message_chars_total}",
+                f"messages_tokens_estimate: {message_tokens_total}",
+                f"tools_chars: {tool_chars}",
+                f"tools_tokens_estimate: {tool_tokens}",
+                f"total_tokens_estimate: {message_tokens_total + tool_tokens}",
+                "",
+                "messages_table:",
+                "index | role | class | chars | tokens_est | tool_calls | name",
+                *message_rows,
+            ]
+        )
+        self._append_section(f"LLM REQUEST #{request_index}", body)
+
+    def _append_prompt_messages(self, messages: list[BaseMessage], *, request_index: int) -> None:
+        """Записывает все сообщения, которые вошли в конкретный запрос к модели.
 
         Args:
             messages: Список сообщений, переданный модели.
+            request_index: Порядковый номер model call внутри текущего trace.
 
         Returns:
-            ``None``. Повторный неизменный system prompt заменяется короткой ссылкой
-            на предыдущую запись.
+            ``None``. Каждый model call логируется самодостаточно, без скрытия повторных
+            system prompt и tool-сообщений.
         """
 
-        system_prompt = "\n\n".join(
-            _message_content(message) for message in messages if isinstance(message, SystemMessage)
-        )
-        if system_prompt:
-            if system_prompt == self._last_system_prompt:
-                self._append_section("SYSTEM PROMPT", "(без изменений, см. выше)")
-            else:
-                self._last_system_prompt = system_prompt
-                self._append_section("SYSTEM PROMPT", system_prompt)
+        for index, message in enumerate(messages, start=1):
+            content = _message_content(message)
+            header_lines = [
+                f"request: {request_index}",
+                f"index: {index}",
+                f"role: {_message_role(message)}",
+                f"class: {message.__class__.__name__}",
+                f"chars: {len(content)}",
+                f"tokens_estimate: {_estimate_token_count(content)}",
+            ]
+            name = str(getattr(message, "name", "") or "")
+            if name:
+                header_lines.append(f"name: {name}")
+            tool_call_id = str(getattr(message, "tool_call_id", "") or "")
+            if tool_call_id:
+                header_lines.append(f"tool_call_id: {tool_call_id}")
+            tool_calls = getattr(message, "tool_calls", []) or []
+            if tool_calls:
+                header_lines.extend(["tool_calls:", _format_json(tool_calls)])
+            header_lines.extend(["content:", content or "(пустое сообщение)"])
+            self._append_section(f"LLM REQUEST #{request_index} MESSAGE #{index}", "\n".join(header_lines))
 
-        for message in messages:
-            if isinstance(message, HumanMessage):
-                self._append_section("USER MESSAGE", _message_content(message))
-
-    def _append_tools(self, tools: list[dict[str, Any]]) -> None:
+    def _append_tools(self, tools: list[dict[str, Any]], *, request_index: int) -> None:
         """Записывает tools, доступные модели на текущем шаге.
 
         Args:
             tools: Нормализованный список описаний tools с именем, описанием и схемой.
+            request_index: Порядковый номер model call внутри текущего trace.
 
         Returns:
-            ``None``. Если набор tools не изменился по именам, пишет компактную
-            ссылку на предыдущую секцию.
+            ``None``. Секция всегда пишет полный набор tools, потому что tools тоже
+            входят в конкретный запрос к LLM.
         """
 
-        signature = _normalize_tool_signature(tools)
-        title = f"TOOLS ({len(tools)})"
-        if signature and signature == self._last_tools_signature:
-            self._append_section(title, "(без изменений, см. выше)")
-            return
-
-        self._last_tools_signature = signature
+        title = f"LLM REQUEST #{request_index} TOOLS ({len(tools)})"
         lines: list[str] = []
         for index, tool in enumerate(tools, start=1):
+            tool_text = _format_json(tool)
             lines.extend(
                 [
                     f"{index}. {tool.get('name') or '(unknown)'}",
+                    f"chars: {len(tool_text)}",
+                    f"tokens_estimate: {_estimate_token_count(tool_text)}",
                     f"описание: {tool.get('description') or ''}",
                     "схема аргументов:",
                     _format_json(tool.get("parameters") or {}),
@@ -265,6 +337,47 @@ def _message_content(message: BaseMessage) -> str:
     return _format_json(content)
 
 
+def _message_role(message: BaseMessage) -> str:
+    """Возвращает человекочитаемую роль LangChain-сообщения для trace-лога.
+
+    Args:
+        message: Сообщение LangChain.
+
+    Returns:
+        Роль сообщения: ``system``, ``user``, ``assistant``, ``tool`` или значение
+        поля ``type``, если сообщение нестандартное.
+    """
+
+    if isinstance(message, SystemMessage):
+        return "system"
+    if isinstance(message, HumanMessage):
+        return "user"
+    if isinstance(message, ToolMessage):
+        return "tool"
+    message_type = str(getattr(message, "type", "") or "").strip()
+    if message_type:
+        if message_type == "ai":
+            return "assistant"
+        return message_type
+    return message.__class__.__name__
+
+
+def _estimate_token_count(text: str) -> int:
+    """Грубо оценивает число токенов по длине текста.
+
+    Args:
+        text: Текст prompt-сообщения, tool schema или ответа.
+
+    Returns:
+        Приблизительное число токенов. Формула не заменяет tokenizer провайдера,
+        но даёт стабильную оценку объёма контекста прямо в trace-файле.
+    """
+
+    if not text:
+        return 0
+    return max(1, (len(text) + 3) // 4)
+
+
 def _extract_tool_specs(raw_tools: Any) -> list[dict[str, Any]]:
     """Нормализует описания tools из параметров вызова модели.
 
@@ -306,20 +419,6 @@ def _format_json(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, indent=2, default=str)
     except TypeError:
         return str(value)
-
-
-def _normalize_tool_signature(tools: list[dict[str, Any]]) -> str:
-    """Создает компактную сигнатуру набора tools для дедупликации.
-
-    Args:
-        tools: Нормализованный список tools.
-
-    Returns:
-        JSON-строка с отсортированными именами tools.
-    """
-
-    names = sorted(str(tool.get("name") or "") for tool in tools)
-    return json.dumps(names, ensure_ascii=False)
 
 
 def _first_generation_message(response: LLMResult) -> BaseMessage | None:

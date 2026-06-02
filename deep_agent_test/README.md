@@ -22,9 +22,11 @@ python run.py
 1. Предзагрузка skills.
 
    Перед первым ответом агент выбирает нужные файлы `SKILL.md` из
-   `deep_agent_test/resources/skills` и добавляет их в system prompt. Эти же skills
-   передаются в `data-retrieval-agent`, поэтому supervisor и subagent работают с одним
-   набором доменных правил.
+   `deep_agent_test/resources/skills` и добавляет их в system prompt. `SKILL.md`
+   сделаны короткими: они содержат карточки источников и workflow, а полные справочники
+   полей лежат рядом в `fields.md`/`joins.md` и читаются только при необходимости.
+   Эти же skills передаются в `data-retrieval-agent`, поэтому supervisor и subagent
+   работают с одним набором доменных правил.
 
 2. Data-retrieval subagent.
 
@@ -41,8 +43,8 @@ python run.py
 4. Инструмент чтения Spark-таблиц.
 
    `build_spark_data_tools(spark)` создает tool `load_data`. Tool принимает простые
-   строковые аргументы. В схемах инструмента нет входных `list[]`: списки колонок,
-   фильтров, агрегаций и сортировок передаются строкой и разбираются внутри инструмента.
+   структурированные аргументы: списки колонок, фильтров, агрегаций и сортировок
+   передаются как JSON-совместимые массивы и объекты.
 
 5. Прозрачный ответ `load_data`.
 
@@ -79,6 +81,7 @@ deep_agent_test/
     state.py                  # дополнительные поля state
     python_sandbox.py         # persistent Python namespace
     agent_specs.py            # имена агентов и structured output critic-а
+    trace_logging.py          # подробный trace одного запуска агента
 
   middlewares/
     skills_context.py         # предзагрузка skills
@@ -95,12 +98,13 @@ deep_agent_test/
 
   resources/
     config/defaults.json      # настройки по умолчанию
-    skills/**/SKILL.md        # доменные инструкции для агента
+    skills/**/SKILL.md        # короткие карточки источников и workflow
+    skills/**/fields.md       # подробные поля, читаются по необходимости
+    skills/**/joins.md        # подробные правила связи источников
 ```
 
-В старой версии были отдельный терминальный demo-runner, trace-логгер и локальные CSV.
-Они удалены из пакета, потому что целевой запуск теперь идет через `python run.py` и
-реальную Spark session.
+Целевой запуск идет через `python run.py`. Trace-логгер подключается как LangChain
+callback и пишет подробный txt-файл по каждому запросу к LLM.
 
 ## Минимальный запуск
 
@@ -110,6 +114,7 @@ deep_agent_test/
 from pyspark.sql import SparkSession
 
 from deep_agent_test import build_analytics_deep_agent, build_spark_data_tools, load_deep_agent_settings
+from deep_agent_test.core.trace_logging import FileTraceCallbackHandler, build_trace_file_path
 from model import model
 
 USER_MESSAGE = "текст запроса пользователя"
@@ -118,13 +123,17 @@ spark = SparkSession.builder.appName("analytics-deep-agent").getOrCreate()
 settings = load_deep_agent_settings()
 data_tools = build_spark_data_tools(spark)
 agent = build_analytics_deep_agent(model=model, settings=settings, data_tools=data_tools)
+trace_file_path = build_trace_file_path(settings.trace_log_dir)
+trace_handler = FileTraceCallbackHandler(trace_file_path)
 result = agent.invoke(
     {"messages": [{"role": "user", "content": USER_MESSAGE}]},
     config={
+        "callbacks": [trace_handler],
         "configurable": {"thread_id": settings.thread_id},
         "recursion_limit": settings.graph_recursion_limit,
     },
 )
+print(f"Trace log: {trace_file_path}")
 ```
 
 В репозитории уже есть готовый `run.py` с таким сценарием. Чтобы задать другой запрос,
@@ -150,39 +159,65 @@ deep_agent_test/resources/config/defaults.json
 - `max_subagent_model_calls` - лимит шагов модели внутри data-retrieval-agent.
 - `max_critic_iterations` - лимит проверок critic-а.
 - `enable_retrieval_critic` - включать ли внутренний critic.
+- `trace_log_dir` - папка для txt-логов с содержимым запросов к LLM.
 
 Если нужен отдельный конфиг для другого проекта, укажите путь в переменной окружения
 `DEEP_AGENT_CONFIG_PATH`. Значения из этого файла переопределят defaults.
 
+## Trace-лог
+
+Каждый вызов модели записывается отдельным блоком `LLM REQUEST #N`. В начале блока
+есть сводка:
+
+- `messages_count` и `tools_count` - сколько сообщений и tools ушло в этот запрос;
+- `messages_chars`, `tools_chars` и `total_tokens_estimate` - грубая оценка объема
+  контекста;
+- `messages_table` - таблица всех сообщений с ролью, классом, размером и числом
+  tool calls.
+
+После сводки идут секции `LLM REQUEST #N TOOLS` и `LLM REQUEST #N MESSAGE #M`.
+Они содержат полный набор tools и полный content каждого сообщения, которое попало
+в конкретный запрос к LLM.
+
 ## Формат `load_data`
 
-Все сложные параметры передаются строками.
+Сложные параметры передаются структурированными списками, а не строковым DSL.
 
 Пример обычной выборки:
 
 ```text
-table_name: csp_afpc_sss_inc.uko_event
-select_columns: event_id, event_dt, event_dttm_readable, epk_id, event_description, transaction_amount
-filters: epk_id eq 2099007770421989000001; event_dt in 20260123,20260124
-order_by: event_dt asc; event_dttm_readable asc
+table_name: uko
+select_columns: ["event_id", "event_dt", "event_dttm_readable", "epk_id", "event_description", "transaction_amount"]
+filters:
+  - {"column": "epk_id", "operator": "eq", "value": "2099007770421989000001"}
+  - {"column": "event_dt", "operator": "in", "values": ["20260123", "20260124"]}
+order_by:
+  - {"column": "event_dt", "direction": "asc"}
+  - {"column": "event_dttm_readable", "direction": "asc"}
 ```
 
 Пример агрегации:
 
 ```text
-table_name: csp_afpc_sss_inc.cards_event
-select_columns:
-filters: event_dt between 20260101,20260131
-group_by: event_description
-aggregations: count(event_id) as events_count; sum(transaction_amount_in_rub) as amount_rub
-order_by: events_count desc
+table_name: cards
+select_columns: []
+filters:
+  - {"column": "event_dt", "operator": "between", "values": ["20260101", "20260131"]}
+group_by: ["event_description"]
+aggregations:
+  - {"function": "count", "column": "event_id", "alias": "events_count"}
+  - {"function": "sum", "column": "transaction_amount_in_rub", "alias": "amount_rub"}
+order_by:
+  - {"column": "events_count", "direction": "desc"}
 ```
 
 Пример вычисляемой колонки:
 
 ```text
-derived_columns: event_month = year_month(event_dt)
-filters: event_month eq 202601
+derived_columns:
+  - {"name": "event_month", "source_column": "event_dt", "operation": "year_month"}
+filters:
+  - {"column": "event_month", "operator": "eq", "value": "202601"}
 ```
 
 Поддерживаемые операторы фильтра:
@@ -211,15 +246,26 @@ Skills лежат в:
 deep_agent_test/resources/skills
 ```
 
-Каждый skill - это папка с файлом `SKILL.md`. Skill должен описывать один понятный
-участок домена: таблицу, группу полей, правило поиска или тип аналитического запроса.
+Каждый skill - это папка с коротким файлом `SKILL.md`. Он должен описывать один
+понятный участок домена: таблицу, правило поиска или тип аналитического запроса.
+`SKILL.md` попадает в preload context, поэтому держите его компактным.
+
+Подробный контекст выносится в соседние файлы:
+
+- `fields.md` - полный список полей и описания редких колонок;
+- `joins.md` - правила связи таблиц и fallback-маршруты;
+- другие файлы - только если они читаются по явному триггеру из `SKILL.md`.
 
 Пример структуры:
 
 ```text
-resources/skills/uko-event-table/SKILL.md
-resources/skills/cards-event-table/SKILL.md
 resources/skills/hit-table/SKILL.md
+resources/skills/hit-table/fields.md
+resources/skills/hit-table/joins.md
+resources/skills/cards-event-table/SKILL.md
+resources/skills/cards-event-table/fields.md
+resources/skills/uko-event-table/SKILL.md
+resources/skills/uko-event-table/fields.md
 ```
 
 Когда добавлять новый skill:
@@ -228,6 +274,14 @@ resources/skills/hit-table/SKILL.md
 - появились новые поля с важными правилами интерпретации;
 - агент часто ошибается в одном и том же типе запроса;
 - нужно зафиксировать правила связи между источниками.
+
+Как добавлять:
+
+- в `SKILL.md` добавляйте только назначение источника, alias, зерно, ключи, главные
+  поля, критические ограничения и ссылки на дополнительные файлы;
+- полный список полей добавляйте в `fields.md`;
+- в `SKILL.md` явно пишите, когда читать `fields.md` или `joins.md`, например:
+  schema error, редкое поле, вопрос про смысл поля, маршрут связи.
 
 Когда не добавлять новый skill:
 
@@ -245,6 +299,7 @@ resources/skills/hit-table/SKILL.md
 6. При необходимости переопределите `resources/config/defaults.json` через
    `DEEP_AGENT_CONFIG_PATH`.
 
-Код агента не должен знать бизнес-смысл таблиц. Этот смысл должен жить в `SKILL.md`.
+Код агента не должен знать бизнес-смысл таблиц. Этот смысл должен жить в skills:
+короткая маршрутизация в `SKILL.md`, подробности в `fields.md` и `joins.md`.
 Так пакет проще переносить между проектами: код отвечает за механику, skills отвечают
 за домен.

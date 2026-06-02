@@ -1,18 +1,20 @@
 """Временный fake-инструмент ``load_data`` для тестов без Spark.
 
 Содержит:
-- FakeReadTableInput: строковая схема аргументов fake-инструмента ``load_data``.
+- ReadTableInput: структурированная схема аргументов fake-инструмента ``load_data``.
 - build_fake_spark_data_tools: сборка LangChain tool поверх CSV-файлов из ``data``.
 - _fake_read_table: выполнение выборки через pandas DataFrame API.
 - _load_table_frame: чтение CSV-файла по жестко заданной карте таблиц.
+- _resolve_table_name: преобразование короткого alias таблицы в ключ CSV-файла.
+- _available_table_aliases_text: форматирование списка доступных alias таблиц.
 - _apply_derived_columns: добавление вычисляемых колонок.
 - _build_derived_series: построение одной вычисляемой pandas Series.
-- _apply_filters: применение строковых фильтров.
+- _apply_filters: применение структурированных фильтров.
 - _build_filter_mask: построение одного pandas-предиката.
 - _apply_aggregations: применение агрегатов.
 - _apply_order_by: сортировка результата.
-- _parse_columns: разбор строки колонок.
-- _split_items: разбор строки со списком инструкций.
+- _parse_columns: разбор списка колонок.
+- _split_items: разбор списка инструкций.
 - _parse_filter_item: разбор одного фильтра.
 - _parse_filter_values: разбор списка значений для операторов ``in`` и ``between``.
 - _parse_derived_item: разбор одной вычисляемой колонки.
@@ -22,6 +24,7 @@
 - _coerce_filter_value: приведение значения фильтра к типу pandas Series.
 - _validate_columns: проверка наличия колонок в DataFrame.
 - _format_missing_columns: человекочитаемая ошибка по отсутствующим колонкам.
+- _get_field: чтение поля из dict или pydantic-модели.
 """
 
 from __future__ import annotations
@@ -32,7 +35,8 @@ from typing import Any
 
 import pandas as pd
 from langchain_core.tools import BaseTool, StructuredTool
-from pydantic import BaseModel, Field
+
+from deep_agent_test.tools.data_query_schema import ReadTableInput
 
 FAKE_DATA_ROOT = Path(__file__).resolve().parents[2] / "data"
 FAKE_TABLE_FILES: dict[str, str] = {
@@ -46,14 +50,24 @@ FAKE_TABLE_FILES: dict[str, str] = {
     ),
     "demo_client_timeline": "demo_client_timeline.csv",
 }
+FAKE_TABLE_ALIASES: dict[str, str] = {
+    "cards": "csp_afpc_sss_inc.cards_event",
+    "uko": "csp_afpc_sss_inc.uko_event",
+    "history_automarking": "csp_repo_features.history_automarking_big_148078_155487",
+    "hits": "cspfs_repo_features3.hits_extra_info_129372427_view",
+    "demo_client_timeline": "demo_client_timeline",
+}
 
 FAKE_READ_TABLE_DESCRIPTION = (
     "load_data\n"
     "---\n"
     "Описание: временный fake-инструмент для тестирования агента без Spark. "
-    "Читает CSV-файлы из локальной папки data и поддерживает тот же строковый "
+    "Читает CSV-файлы из локальной папки data и поддерживает тот же структурированный "
     "интерфейс, что production load_data: select_columns, filters, derived_columns, "
     "group_by, aggregations, order_by, max_rows и include_schema. "
+    "В table_name принимает только короткие alias таблиц: hits, cards, uko, "
+    "history_automarking или demo_client_timeline. "
+    "Сложные параметры передаются структурированными списками объектов, а не строковым DSL. "
     "Инструмент временный, использует хардкод таблиц и не должен встраиваться "
     "в production-логику проекта."
 )
@@ -61,35 +75,6 @@ FAKE_READ_TABLE_DESCRIPTION = (
 _FILTER_OPERATORS = {"eq", "ne", "gt", "gte", "lt", "lte", "contains", "in", "between", "is_null", "not_null"}
 _DERIVED_OPERATIONS = {"year", "month", "year_month", "date", "lower", "upper", "length", "abs"}
 _AGGREGATION_FUNCTIONS = {"count", "count_distinct", "min", "max", "sum", "mean"}
-
-
-class FakeReadTableInput(BaseModel):
-    """Строковые аргументы fake-инструмента чтения таблиц из CSV.
-
-    Args:
-        table_name: Имя таблицы из жестко заданной карты ``FAKE_TABLE_FILES``.
-        select_columns: Поля результата в формате ``col1, col2``.
-        filters: Фильтры одной строкой через ``;`` или перенос строки.
-        derived_columns: Вычисляемые колонки одной строкой через ``;``.
-        group_by: Поля группировки в формате ``col1, col2``.
-        aggregations: Агрегаты одной строкой через ``;``.
-        order_by: Сортировка одной строкой через ``;``.
-        max_rows: Максимальное число строк, которое нужно вернуть.
-        include_schema: Нужно ли приложить схему результата в metadata DataFrame.
-
-    Returns:
-        Валидированные строковые параметры для fake ``load_data``.
-    """
-
-    table_name: str = Field(description="Имя fake-таблицы, например csp_afpc_sss_inc.uko_event.")
-    select_columns: str = Field(default="", description="Поля результата через запятую.")
-    filters: str = Field(default="", description="Фильтры через ';' или перенос строки.")
-    derived_columns: str = Field(default="", description="Вычисляемые поля через ';'.")
-    group_by: str = Field(default="", description="Поля группировки через запятую.")
-    aggregations: str = Field(default="", description="Агрегаты через ';'.")
-    order_by: str = Field(default="", description="Сортировка через ';'.")
-    max_rows: int | None = Field(default=None, ge=0, description="Максимальное число строк результата.")
-    include_schema: bool = Field(default=False, description="Если True, добавить схему результата в metadata.")
 
 
 def build_fake_spark_data_tools() -> list[BaseTool]:
@@ -104,12 +89,12 @@ def build_fake_spark_data_tools() -> list[BaseTool]:
 
     def read_table(
         table_name: str,
-        select_columns: str = "",
-        filters: str = "",
-        derived_columns: str = "",
-        group_by: str = "",
-        aggregations: str = "",
-        order_by: str = "",
+        select_columns: list[str] | str | None = None,
+        filters: list[Any] | str | None = None,
+        derived_columns: list[Any] | str | None = None,
+        group_by: list[str] | str | None = None,
+        aggregations: list[Any] | str | None = None,
+        order_by: list[Any] | str | None = None,
         max_rows: int | None = None,
         include_schema: bool = False,
     ) -> Any:
@@ -117,12 +102,12 @@ def build_fake_spark_data_tools() -> list[BaseTool]:
 
         Args:
             table_name: Имя fake-таблицы.
-            select_columns: Поля результата в формате ``col1, col2``.
-            filters: Фильтры одной строкой через ``;`` или перенос строки.
-            derived_columns: Вычисляемые колонки одной строкой через ``;``.
-            group_by: Поля группировки в формате ``col1, col2``.
-            aggregations: Агрегаты одной строкой через ``;``.
-            order_by: Сортировка одной строкой через ``;``.
+            select_columns: Поля результата списком.
+            filters: Фильтры списком объектов ``{column, operator, value/values}``.
+            derived_columns: Вычисляемые колонки списком объектов.
+            group_by: Поля группировки списком.
+            aggregations: Агрегаты списком объектов.
+            order_by: Сортировка списком объектов.
             max_rows: Максимальное число строк результата.
             include_schema: Нужно ли приложить схему результата в metadata DataFrame.
 
@@ -147,7 +132,7 @@ def build_fake_spark_data_tools() -> list[BaseTool]:
             func=read_table,
             name="load_data",
             description=FAKE_READ_TABLE_DESCRIPTION,
-            args_schema=FakeReadTableInput,
+            args_schema=ReadTableInput,
         )
     ]
 
@@ -155,12 +140,12 @@ def build_fake_spark_data_tools() -> list[BaseTool]:
 def _fake_read_table(
     *,
     table_name: str,
-    select_columns: str,
-    filters: str,
-    derived_columns: str,
-    group_by: str,
-    aggregations: str,
-    order_by: str,
+    select_columns: Any,
+    filters: Any,
+    derived_columns: Any,
+    group_by: Any,
+    aggregations: Any,
+    order_by: Any,
     max_rows: int | None,
     include_schema: bool,
 ) -> Any:
@@ -168,12 +153,12 @@ def _fake_read_table(
 
     Args:
         table_name: Имя таблицы из ``FAKE_TABLE_FILES``.
-        select_columns: Поля результата строкой.
-        filters: Фильтры строкой.
-        derived_columns: Вычисляемые колонки строкой.
-        group_by: Поля группировки строкой.
-        aggregations: Агрегаты строкой.
-        order_by: Сортировка строкой.
+        select_columns: Поля результата списком.
+        filters: Фильтры списком объектов.
+        derived_columns: Вычисляемые колонки списком объектов.
+        group_by: Поля группировки списком.
+        aggregations: Агрегаты списком объектов.
+        order_by: Сортировка списком объектов.
         max_rows: Максимальное число строк результата.
         include_schema: Нужно ли приложить схему результата.
 
@@ -182,8 +167,9 @@ def _fake_read_table(
     """
 
     try:
-        table_name = table_name.strip()
-        table = _load_table_frame(table_name)
+        table_alias = table_name.strip()
+        resolved_table_name = _resolve_table_name(table_alias)
+        table = _load_table_frame(resolved_table_name)
         total_rows = len(table)
         table = _apply_derived_columns(table=table, derived_columns=derived_columns)
         table = _apply_filters(table=table, filters=filters)
@@ -214,13 +200,15 @@ def _fake_read_table(
         if max_rows is not None:
             result = result.head(max(0, int(max_rows))).copy()
 
-        result.attrs["spark_table_name"] = table_name
-        result.attrs["spark_source_file"] = str((FAKE_DATA_ROOT / FAKE_TABLE_FILES[table_name]).resolve())
+        result.attrs["spark_table_name"] = table_alias
+        result.attrs["spark_resolved_table_name"] = resolved_table_name
+        result.attrs["spark_source_file"] = table_alias
         result.attrs["spark_total_rows"] = int(total_rows)
         result.attrs["spark_matched_rows"] = int(matched_rows)
         if include_schema:
             result.attrs["spark_schema"] = {
-                "table_name": table_name,
+                "table_name": table_alias,
+                "resolved_table_name": resolved_table_name,
                 "columns_count": len(result.columns),
                 "columns": [{"name": str(name), "type": str(dtype)} for name, dtype in result.dtypes.items()],
             }
@@ -251,12 +239,52 @@ def _load_table_frame(table_name: str) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
-def _apply_derived_columns(*, table: pd.DataFrame, derived_columns: str) -> pd.DataFrame:
+def _resolve_table_name(table_name: str) -> str:
+    """Преобразует короткое имя таблицы в ключ CSV-файла.
+
+    Args:
+        table_name: Короткий alias таблицы, который передала модель.
+
+    Returns:
+        Полное внутреннее имя таблицы для поиска CSV-файла.
+
+    Raises:
+        ValueError: Передано неизвестное или похожее на файл значение ``table_name``.
+    """
+
+    normalized = table_name.strip()
+    if not normalized:
+        raise ValueError(f"нужно указать alias таблицы. Доступные таблицы: {_available_table_aliases_text()}.")
+    suspicious_fragments = (".", "saved_file", "virtual_file", "select_columns=", "/", "\\", "=")
+    if any(fragment in normalized for fragment in suspicious_fragments) or len(normalized) > 80:
+        raise ValueError(
+            "table_name должен быть коротким alias таблицы, а не путём к файлу, именем артефакта "
+            f"или сгенерированным view. Доступные таблицы: {_available_table_aliases_text()}."
+        )
+    if normalized not in FAKE_TABLE_ALIASES:
+        raise ValueError(f"неизвестная таблица {normalized!r}. Доступные таблицы: {_available_table_aliases_text()}.")
+    return FAKE_TABLE_ALIASES[normalized]
+
+
+def _available_table_aliases_text() -> str:
+    """Возвращает человекочитаемый список alias таблиц для сообщений инструмента.
+
+    Args:
+        Отсутствуют.
+
+    Returns:
+        Строка с короткими именами таблиц через запятую.
+    """
+
+    return ", ".join(sorted(FAKE_TABLE_ALIASES))
+
+
+def _apply_derived_columns(*, table: pd.DataFrame, derived_columns: Any) -> pd.DataFrame:
     """Добавляет вычисляемые колонки к pandas DataFrame.
 
     Args:
         table: Исходный pandas DataFrame.
-        derived_columns: Описания вычисляемых колонок строкой.
+        derived_columns: Описания вычисляемых колонок списком объектов или строкой.
 
     Returns:
         pandas DataFrame с добавленными колонками.
@@ -305,12 +333,12 @@ def _build_derived_series(*, source: pd.Series, operation: str) -> pd.Series:
     raise ValueError(f"Неподдерживаемая операция вычисляемой колонки: {operation}")
 
 
-def _apply_filters(*, table: pd.DataFrame, filters: str) -> pd.DataFrame:
+def _apply_filters(*, table: pd.DataFrame, filters: Any) -> pd.DataFrame:
     """Применяет строковые фильтры к pandas DataFrame.
 
     Args:
         table: Исходный pandas DataFrame.
-        filters: Фильтры одной строкой.
+        filters: Фильтры списком объектов или одной строкой.
 
     Returns:
         Отфильтрованный pandas DataFrame.
@@ -326,12 +354,12 @@ def _apply_filters(*, table: pd.DataFrame, filters: str) -> pd.DataFrame:
     return result
 
 
-def _build_filter_mask(*, table: pd.DataFrame, item: str) -> pd.Series:
+def _build_filter_mask(*, table: pd.DataFrame, item: Any) -> pd.Series:
     """Строит pandas mask из одного строкового фильтра.
 
     Args:
         table: pandas DataFrame, к которому применяется фильтр.
-        item: Один фильтр в формате ``column operator value``.
+        item: Один фильтр в структурированном или строковом формате.
 
     Returns:
         pandas Series с булевым условием.
@@ -370,13 +398,13 @@ def _build_filter_mask(*, table: pd.DataFrame, item: str) -> pd.Series:
     raise ValueError(f"Неподдерживаемый оператор фильтра: {operator}")
 
 
-def _apply_aggregations(*, table: pd.DataFrame, group_columns: list[str], aggregations: list[str]) -> pd.DataFrame:
+def _apply_aggregations(*, table: pd.DataFrame, group_columns: list[str], aggregations: list[Any]) -> pd.DataFrame:
     """Применяет агрегаты к pandas DataFrame.
 
     Args:
         table: Отфильтрованный pandas DataFrame.
         group_columns: Поля группировки.
-        aggregations: Строковые описания агрегатов.
+        aggregations: Описания агрегатов списком объектов или строк.
 
     Returns:
         pandas DataFrame с результатом агрегаций.
@@ -423,12 +451,12 @@ def _aggregation_name(function: str) -> str:
     raise ValueError(f"Неподдерживаемая агрегатная функция: {function}")
 
 
-def _apply_order_by(*, table: pd.DataFrame, order_by: list[str]) -> pd.DataFrame:
+def _apply_order_by(*, table: pd.DataFrame, order_by: list[Any]) -> pd.DataFrame:
     """Сортирует pandas DataFrame.
 
     Args:
         table: pandas DataFrame результата.
-        order_by: Строковые правила сортировки.
+        order_by: Правила сортировки списком объектов или строк.
 
     Returns:
         Отсортированный pandas DataFrame.
@@ -443,11 +471,11 @@ def _apply_order_by(*, table: pd.DataFrame, order_by: list[str]) -> pd.DataFrame
     return table.sort_values(by=columns, ascending=ascending, kind="mergesort")
 
 
-def _parse_columns(value: str | None) -> list[str]:
+def _parse_columns(value: Any) -> list[str]:
     """Разбирает строку колонок через запятую.
 
     Args:
-        value: Строка вида ``col1, col2``.
+        value: Список колонок или строка вида ``col1, col2``.
 
     Returns:
         Список колонок без пустых значений.
@@ -455,14 +483,16 @@ def _parse_columns(value: str | None) -> list[str]:
 
     if not value:
         return []
+    if isinstance(value, (list, tuple)):
+        return [str(part).strip() for part in value if str(part).strip()]
     return [part.strip() for part in str(value).split(",") if part.strip()]
 
 
-def _split_items(value: str | None) -> list[str]:
+def _split_items(value: Any) -> list[Any]:
     """Разбирает строку инструкций через ``;`` или перенос строки.
 
     Args:
-        value: Строка с несколькими инструкциями.
+        value: Список инструкций или строка с несколькими инструкциями.
 
     Returns:
         Список непустых инструкций.
@@ -470,19 +500,43 @@ def _split_items(value: str | None) -> list[str]:
 
     if not value:
         return []
+    if isinstance(value, (list, tuple)):
+        return [item for item in value if item]
     normalized = str(value).replace("\n", ";")
     return [item.strip() for item in normalized.split(";") if item.strip()]
 
 
-def _parse_filter_item(item: str) -> tuple[str, str, str]:
-    """Разбирает один строковый фильтр.
+def _parse_filter_item(item: Any) -> tuple[str, str, str]:
+    """Разбирает один фильтр.
 
     Args:
-        item: Фильтр в формате ``column operator value`` или ``column=value``.
+        item: Фильтр в структурированном формате или строка ``column operator value``.
 
     Returns:
         Кортеж ``(column, operator, value)``.
     """
+
+    if not isinstance(item, str):
+        column = str(_get_field(item, "column") or "").strip()
+        operator = str(_get_field(item, "operator") or "eq").strip().lower()
+        values = _get_field(item, "values") or []
+        value = _get_field(item, "value")
+        second_value = _get_field(item, "second_value")
+        if operator not in _FILTER_OPERATORS:
+            raise ValueError(f"Неподдерживаемый оператор фильтра: {operator}")
+        if operator == "in":
+            raw_values = values if values else ([] if value is None else [value])
+            raw_value = ",".join(str(part) for part in raw_values)
+        elif operator == "between":
+            raw_values = values if values else [part for part in (value, second_value) if part is not None]
+            raw_value = ",".join(str(part) for part in raw_values)
+        else:
+            raw_value = "" if value is None else str(value)
+        if not column:
+            raise ValueError(f"В фильтре не указана колонка: {item}")
+        if operator not in {"is_null", "not_null"} and not raw_value:
+            raise ValueError(f"Для фильтра {item!r} нужно передать value или values.")
+        return column, operator, raw_value
 
     if "=" in item and not re.search(r"\s(eq|ne|gt|gte|lt|lte|contains|in|between)\s", item, flags=re.I):
         column, value = item.split("=", 1)
@@ -521,15 +575,23 @@ def _parse_filter_values(raw_value: str) -> list[str]:
     return [part.strip() for part in parts if part.strip()]
 
 
-def _parse_derived_item(item: str) -> tuple[str, str, str]:
+def _parse_derived_item(item: Any) -> tuple[str, str, str]:
     """Разбирает описание вычисляемой колонки.
 
     Args:
-        item: Строка вида ``new_col = operation(source_col)``.
+        item: Структурированное описание или строка вида ``new_col = operation(source_col)``.
 
     Returns:
         Кортеж ``(name, source_column, operation)``.
     """
+
+    if not isinstance(item, str):
+        name = str(_get_field(item, "name") or "").strip()
+        source_column = str(_get_field(item, "source_column") or "").strip()
+        operation = str(_get_field(item, "operation") or "").strip().lower()
+        if not name or not source_column or operation not in _DERIVED_OPERATIONS:
+            raise ValueError(f"Некорректное описание derived_columns: {item}")
+        return name, source_column, operation
 
     match = re.fullmatch(r"\s*([A-Za-z_][\w]*)\s*=\s*([A-Za-z_][\w]*)\(([^)]+)\)\s*", item)
     if match is None:
@@ -541,15 +603,23 @@ def _parse_derived_item(item: str) -> tuple[str, str, str]:
     return name.strip(), source_column.strip(), operation
 
 
-def _parse_aggregation_item(item: str) -> tuple[str, str, str]:
+def _parse_aggregation_item(item: Any) -> tuple[str, str, str]:
     """Разбирает описание агрегата.
 
     Args:
-        item: Строка вида ``function(column) as alias``.
+        item: Структурированное описание или строка вида ``function(column) as alias``.
 
     Returns:
         Кортеж ``(function, column, alias)``.
     """
+
+    if not isinstance(item, str):
+        function = str(_get_field(item, "function") or "").strip().lower()
+        column = str(_get_field(item, "column") or "").strip()
+        alias = str(_get_field(item, "alias") or "").strip()
+        if function not in _AGGREGATION_FUNCTIONS or not column:
+            raise ValueError(f"Некорректное описание aggregations: {item}")
+        return function, column, alias
 
     match = re.fullmatch(r"\s*([A-Za-z_][\w]*)\(([^)]+)\)(?:\s+as\s+([A-Za-z_][\w]*))?\s*", item, flags=re.I)
     if match is None:
@@ -561,15 +631,24 @@ def _parse_aggregation_item(item: str) -> tuple[str, str, str]:
     return function, column.strip(), (alias or "").strip()
 
 
-def _parse_order_item(item: str) -> tuple[str, str]:
+def _parse_order_item(item: Any) -> tuple[str, str]:
     """Разбирает одно правило сортировки.
 
     Args:
-        item: Строка вида ``column asc`` или ``column desc``.
+        item: Структурированное правило или строка вида ``column asc``.
 
     Returns:
         Кортеж ``(column, direction)``.
     """
+
+    if not isinstance(item, str):
+        column = str(_get_field(item, "column") or "").strip()
+        direction = str(_get_field(item, "direction") or "asc").strip().lower()
+        if not column:
+            raise ValueError(f"В сортировке не указана колонка: {item}")
+        if direction not in {"asc", "desc"}:
+            raise ValueError(f"Направление сортировки должно быть asc или desc: {item}")
+        return column, direction
 
     parts = item.replace(":", " ").split()
     if not parts:
@@ -671,10 +750,26 @@ def _format_missing_columns(*, missing: list[str], available_columns: list[str])
     )
 
 
+def _get_field(source: Any, key: str) -> Any:
+    """Достаёт поле из dict или pydantic-модели.
+
+    Args:
+        source: Объект с данными фильтра, агрегации, вычисляемой колонки или сортировки.
+        key: Имя поля.
+
+    Returns:
+        Значение поля или ``None``, если поле отсутствует.
+    """
+
+    if isinstance(source, dict):
+        return source.get(key)
+    return getattr(source, key, None)
+
+
 __all__ = [
     "FAKE_DATA_ROOT",
     "FAKE_READ_TABLE_DESCRIPTION",
+    "FAKE_TABLE_ALIASES",
     "FAKE_TABLE_FILES",
-    "FakeReadTableInput",
     "build_fake_spark_data_tools",
 ]
