@@ -36,11 +36,23 @@ class FilterCondition(BaseModel):
         Валидированное описание одного фильтра.
     """
 
-    column: str = Field(description="Имя колонки для фильтра.")
-    operator: FilterOperator = Field(description="Оператор фильтра: eq, ne, gt, gte, lt, lte, contains, in, between, is_null или not_null.")
-    value: ScalarValue | None = Field(default=None, description="Одно значение фильтра. Для in используй values; для between можно указать первую границу.")
-    values: list[ScalarValue] = Field(default_factory=list, description="Список значений для операторов in и between.")
-    second_value: ScalarValue | None = Field(default=None, description="Вторая граница для оператора between, если первая граница передана в value.")
+    column: str = Field(description="Имя колонки для фильтра. Пример: event_id.", examples=["event_id"])
+    operator: FilterOperator = Field(description="Оператор фильтра. Пример: eq.", examples=["eq"])
+    value: ScalarValue | None = Field(
+        default=None,
+        description="Одно значение фильтра для eq, ne, gt, gte, lt, lte или contains. Пример: 3486d84b-4eba-4ba4-b044-94764fc9e7a4.",
+        examples=["3486d84b-4eba-4ba4-b044-94764fc9e7a4"],
+    )
+    values: list[ScalarValue] = Field(
+        default_factory=list,
+        description="Список значений для операторов in и between. Пример: ['20260101', '20260131'].",
+        examples=[["20260101", "20260131"]],
+    )
+    second_value: ScalarValue | None = Field(
+        default=None,
+        description="Вторая граница для between, если первая граница передана в value. Пример: 20260131.",
+        examples=["20260131"],
+    )
 
 
 class DerivedColumnSpec(BaseModel):
@@ -55,9 +67,9 @@ class DerivedColumnSpec(BaseModel):
         Валидированное описание вычисляемой колонки.
     """
 
-    name: str = Field(description="Имя новой вычисляемой колонки.")
-    source_column: str = Field(description="Исходная колонка для преобразования.")
-    operation: DerivedOperation = Field(description="Операция: year, month, year_month, date, lower, upper, length или abs.")
+    name: str = Field(description="Имя новой вычисляемой колонки. Пример: event_month.", examples=["event_month"])
+    source_column: str = Field(description="Исходная колонка для преобразования. Пример: event_dt.", examples=["event_dt"])
+    operation: DerivedOperation = Field(description="Операция преобразования. Пример: year_month.", examples=["year_month"])
 
 
 class AggregationSpec(BaseModel):
@@ -72,9 +84,9 @@ class AggregationSpec(BaseModel):
         Валидированное описание агрегата.
     """
 
-    function: AggregationFunction = Field(description="Агрегатная функция: count, count_distinct, min, max, sum или mean.")
-    column: str = Field(description="Колонка для агрегации.")
-    alias: str = Field(default="", description="Имя результирующей колонки.")
+    function: AggregationFunction = Field(description="Агрегатная функция. Пример: count.", examples=["count"])
+    column: str = Field(description="Колонка для агрегации. Пример: event_id.", examples=["event_id"])
+    alias: str = Field(default="", description="Имя результирующей колонки. Пример: events_count.", examples=["events_count"])
 
 
 class OrderBySpec(BaseModel):
@@ -88,8 +100,8 @@ class OrderBySpec(BaseModel):
         Валидированное правило сортировки.
     """
 
-    column: str = Field(description="Колонка для сортировки.")
-    direction: SortDirection = Field(default="asc", description="Направление сортировки: asc или desc.")
+    column: str = Field(description="Колонка для сортировки. Пример: event_dt.", examples=["event_dt"])
+    direction: SortDirection = Field(default="asc", description="Направление сортировки. Пример: asc.", examples=["asc"])
 
 
 class ReadTableInput(BaseModel):
@@ -110,21 +122,66 @@ class ReadTableInput(BaseModel):
         Валидированные аргументы для ``load_data``.
     """
 
-    table_name: str = Field(description="Короткое имя таблицы: hits, cards, uko, history_automarking или demo_client_timeline.")
+    table_name: str = Field(
+        description="Короткое имя таблицы. Пример: hits. Допустимые alias: hits, cards, uko, history_automarking, demo_client_timeline.",
+        examples=["hits"],
+    )
     select_columns: list[str] = Field(
         default_factory=list,
         description=(
             "Обязательные колонки результата для обычной выборки. "
-            "Не оставляй пустым без aggregations; не используй '*' и 'all'."
+            "Не оставляй пустым без aggregations; не используй '*' и 'all'. "
+            "Пример: ['event_id', 'event_dt', 'event_time']."
         ),
+        examples=[["event_id", "event_dt", "event_time"]],
     )
-    filters: list[FilterCondition] = Field(default_factory=list, description="Фильтры строк таблицы.")
-    derived_columns: list[DerivedColumnSpec] = Field(default_factory=list, description="Вычисляемые колонки.")
-    group_by: list[str] = Field(default_factory=list, description="Колонки группировки.")
-    aggregations: list[AggregationSpec] = Field(default_factory=list, description="Агрегаты для расчёта.")
-    order_by: list[OrderBySpec] = Field(default_factory=list, description="Правила сортировки результата.")
-    max_rows: int | None = Field(default=None, ge=0, description="Максимальное число строк результата.")
-    include_schema: bool = Field(default=False, description="Если True, добавить схему результата в metadata.")
+    filters: list[FilterCondition] = Field(
+        default_factory=list,
+        description=(
+            "Фильтры строк таблицы. "
+            "Пример: [{'column': 'event_id', 'operator': 'eq', 'value': '3486d84b-4eba-4ba4-b044-94764fc9e7a4'}]."
+        ),
+        examples=[
+            [{"column": "event_id", "operator": "eq", "value": "3486d84b-4eba-4ba4-b044-94764fc9e7a4"}]
+        ],
+    )
+    derived_columns: list[DerivedColumnSpec] = Field(
+        default_factory=list,
+        description=(
+            "Вычисляемые колонки. "
+            "Пример: [{'name': 'event_month', 'source_column': 'event_dt', 'operation': 'year_month'}]."
+        ),
+        examples=[[{"name": "event_month", "source_column": "event_dt", "operation": "year_month"}]],
+    )
+    group_by: list[str] = Field(
+        default_factory=list,
+        description="Колонки группировки. Пример: ['event_description'].",
+        examples=[["event_description"]],
+    )
+    aggregations: list[AggregationSpec] = Field(
+        default_factory=list,
+        description=(
+            "Агрегаты для расчёта. "
+            "Пример: [{'function': 'count', 'column': 'event_id', 'alias': 'events_count'}]."
+        ),
+        examples=[[{"function": "count", "column": "event_id", "alias": "events_count"}]],
+    )
+    order_by: list[OrderBySpec] = Field(
+        default_factory=list,
+        description="Правила сортировки результата. Пример: [{'column': 'event_dt', 'direction': 'asc'}].",
+        examples=[[{"column": "event_dt", "direction": "asc"}]],
+    )
+    max_rows: int | None = Field(
+        default=None,
+        ge=0,
+        description="Максимальное число строк результата. Пример для точечного поиска: 1.",
+        examples=[1],
+    )
+    include_schema: bool = Field(
+        default=False,
+        description="Если True, добавить схему результата в metadata. Пример: false.",
+        examples=[False],
+    )
 
     @model_validator(mode="after")
     def validate_select_or_aggregations(self) -> "ReadTableInput":

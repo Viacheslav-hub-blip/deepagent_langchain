@@ -38,6 +38,7 @@ import pandas as pd
 from langchain_core.tools import BaseTool, StructuredTool
 
 from deep_agent_test.tools.data_query_schema import ReadTableInput
+from deep_agent_test.tools.spark_data import READ_TABLE_DESCRIPTION
 
 FAKE_DATA_ROOT = Path(__file__).resolve().parents[2] / "data"
 FAKE_TABLE_FILES: dict[str, str] = {
@@ -59,20 +60,7 @@ FAKE_TABLE_ALIASES: dict[str, str] = {
     "demo_client_timeline": "demo_client_timeline",
 }
 
-FAKE_READ_TABLE_DESCRIPTION = (
-    "load_data\n"
-    "---\n"
-    "Описание: временный fake-инструмент для тестирования агента без Spark. "
-    "Читает CSV-файлы из локальной папки data и поддерживает тот же структурированный "
-    "интерфейс, что production load_data: select_columns, filters, derived_columns, "
-    "group_by, aggregations, order_by, max_rows и include_schema. "
-    "В table_name принимает только короткие alias таблиц: hits, cards, uko, "
-    "history_automarking или demo_client_timeline. "
-    "Сложные параметры передаются структурированными списками объектов, а не строковым DSL. "
-    "Обычная выборка без явного select_columns запрещена: инструмент не выполняет SELECT *. "
-    "Инструмент временный, использует хардкод таблиц и не должен встраиваться "
-    "в production-логику проекта."
-)
+FAKE_READ_TABLE_DESCRIPTION = READ_TABLE_DESCRIPTION
 
 _FILTER_OPERATORS = {"eq", "ne", "gt", "gte", "lt", "lte", "contains", "in", "between", "is_null", "not_null"}
 _DERIVED_OPERATIONS = {"year", "month", "year_month", "date", "lower", "upper", "length", "abs"}
