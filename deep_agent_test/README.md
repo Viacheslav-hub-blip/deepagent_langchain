@@ -42,9 +42,9 @@ python run.py
 
 4. Инструмент чтения Spark-таблиц.
 
-   `build_spark_data_tools(spark)` создает tool `load_data`. Tool принимает простые
-   структурированные аргументы: списки колонок, фильтров, агрегаций и сортировок
-   передаются как JSON-совместимые массивы и объекты.
+   `build_spark_data_tools(spark)` создает tool `load_data`. Tool принимает один
+   аргумент `query`: SQL-подобный запрос с alias таблицы, обязательным периодом,
+   явными колонками результата, фильтрами, агрегациями и сортировкой.
 
 5. Прозрачный ответ `load_data`.
 
@@ -181,54 +181,50 @@ deep_agent_test/resources/config/defaults.json
 
 ## Формат `load_data`
 
-Сложные параметры передаются структурированными списками, а не строковым DSL.
-Для обычной выборки `select_columns` обязателен. Вызов только с `table_name`
-запрещён: `load_data` не выполняет `SELECT *`. Для расчётов вместо `select_columns`
-передавайте `aggregations`.
+`load_data` принимает один параметр `query`. Внутри `query` передается SQL-подобный
+запрос. Для каждой выборки обязателен `PERIOD`; `SELECT *` и `SELECT all` запрещены.
 
 Пример обычной выборки:
 
 ```text
-table_name: uko
-select_columns: ["event_id", "event_dt", "event_dttm_readable", "epk_id", "event_description", "transaction_amount"]
-filters:
-  - {"column": "epk_id", "operator": "eq", "value": "2099007770421989000001"}
-  - {"column": "event_dt", "operator": "in", "values": ["20260123", "20260124"]}
-order_by:
-  - {"column": "event_dt", "direction": "asc"}
-  - {"column": "event_dttm_readable", "direction": "asc"}
+query:
+LOAD uko
+PERIOD event_dt FROM '20260123' TO '20260124'
+SELECT event_id, event_dt, event_dttm_readable, epk_id, event_description, transaction_amount
+WHERE epk_id = '2099007770421989000001'
+ORDER BY event_dt ASC, event_dttm_readable ASC
 ```
 
 Пример агрегации:
 
 ```text
-table_name: cards
-filters:
-  - {"column": "event_dt", "operator": "between", "values": ["20260101", "20260131"]}
-group_by: ["event_description"]
-aggregations:
-  - {"function": "count", "column": "event_id", "alias": "events_count"}
-  - {"function": "sum", "column": "transaction_amount_in_rub", "alias": "amount_rub"}
-order_by:
-  - {"column": "events_count", "direction": "desc"}
+query:
+LOAD cards
+PERIOD event_dt FROM '20260101' TO '20260131'
+SELECT event_description, count(event_id) AS events_count, sum(transaction_amount_in_rub) AS amount_rub
+GROUP BY event_description
+ORDER BY events_count DESC
 ```
 
 Пример вычисляемой колонки:
 
 ```text
-derived_columns:
-  - {"name": "event_month", "source_column": "event_dt", "operation": "year_month"}
-filters:
-  - {"column": "event_month", "operator": "eq", "value": "202601"}
+query:
+LOAD cards
+PERIOD event_dt FROM '20260101' TO '20260131'
+DERIVE event_month = year_month(event_dt)
+SELECT event_month, count(event_id) AS events_count
+WHERE event_month = '202601'
+GROUP BY event_month
 ```
 
 Поддерживаемые операторы фильтра:
 
 ```text
-eq, ne, gt, gte, lt, lte, contains, in, between, is_null, not_null
+=, !=, <>, >, >=, <, <=, CONTAINS, IN (...), BETWEEN
 ```
 
-Поддерживаемые операции для `derived_columns`:
+Поддерживаемые операции для `DERIVE`:
 
 ```text
 year, month, year_month, date, lower, upper, length, abs

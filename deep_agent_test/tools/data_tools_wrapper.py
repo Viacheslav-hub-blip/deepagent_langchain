@@ -97,13 +97,12 @@ _TRANSPARENCY_NOTE = (
 def _format_result(kwargs: dict[str, Any], raw: Any) -> tuple[str, Any]:
     """Готовит пару (content, artifact) для агента из результата базового инструмента."""
 
-    query_code = _build_query_code(kwargs)
-
     if pd is not None and isinstance(raw, pd.DataFrame):
+        query_code = str(raw.attrs.get("spark_query_code") or _build_query_code(kwargs))
         rows = _dataframe_to_rows(raw)
         returned_rows = len(raw)
         columns = [str(column) for column in raw.columns]
-        is_aggregation = bool(_split_instruction_text(_get(kwargs, "aggregations")))
+        is_aggregation = bool(raw.attrs.get("spark_is_aggregation")) or bool(_split_instruction_text(_get(kwargs, "aggregations")))
         content = _build_success_content(
             query_code=query_code,
             returned_rows=returned_rows,
@@ -121,6 +120,7 @@ def _format_result(kwargs: dict[str, Any], raw: Any) -> tuple[str, Any]:
         return content, artifact
 
     # Ошибка или текстовый результат базового инструмента: показываем, что пытались выполнить.
+    query_code = _build_query_code(kwargs)
     content = f"Сгенерированный SQL-подобный запрос:\n{query_code}\n\nРезультат инструмента:\n{raw}"
     return content, None
 
@@ -191,6 +191,10 @@ def _clean_scalar(value: Any) -> Any:
 
 def _build_query_code(kwargs: dict[str, Any]) -> str:
     """Строит человекочитаемый SQL-подобный код фактического запроса из аргументов вызова."""
+
+    direct_query = _get(kwargs, "query")
+    if direct_query:
+        return str(direct_query).strip()
 
     table_name = _get(kwargs, "table_name") or "<table>"
     select_columns = _parse_columns(_get(kwargs, "select_columns"))

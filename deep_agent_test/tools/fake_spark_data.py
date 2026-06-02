@@ -3,6 +3,7 @@
 Содержит:
 - ReadTableInput: структурированная схема аргументов fake-инструмента ``load_data``.
 - build_fake_spark_data_tools: сборка LangChain tool поверх CSV-файлов из ``data``.
+- _parse_sql_like_query: разбор SQL-подобного запроса в аргументы выборки.
 - _fake_read_table: выполнение выборки через pandas DataFrame API.
 - _load_table_frame: чтение CSV-файла по жестко заданной карте таблиц.
 - _resolve_table_name: преобразование короткого alias таблицы в ключ CSV-файла.
@@ -38,7 +39,7 @@ import pandas as pd
 from langchain_core.tools import BaseTool, StructuredTool
 
 from deep_agent_test.tools.data_query_schema import ReadTableInput
-from deep_agent_test.tools.spark_data import READ_TABLE_DESCRIPTION
+from deep_agent_test.tools.spark_data import READ_TABLE_DESCRIPTION, _parse_sql_like_query
 
 FAKE_DATA_ROOT = Path(__file__).resolve().parents[2] / "data"
 FAKE_TABLE_FILES: dict[str, str] = {
@@ -77,45 +78,26 @@ def build_fake_spark_data_tools() -> list[BaseTool]:
         Список с одним LangChain tool ``load_data`` для тестов агента без Spark.
     """
 
-    def read_table(
-        table_name: str,
-        select_columns: list[str] | str | None = None,
-        filters: list[Any] | str | None = None,
-        derived_columns: list[Any] | str | None = None,
-        group_by: list[str] | str | None = None,
-        aggregations: list[Any] | str | None = None,
-        order_by: list[Any] | str | None = None,
-        max_rows: int | None = None,
-        include_schema: bool = False,
-    ) -> Any:
-        """Выполняет выборку из локального CSV-файла через pandas.
+    def read_table(query: str) -> Any:
+        """Выполняет SQL-подобный запрос к локальному CSV-файлу через pandas.
 
         Args:
-            table_name: Имя fake-таблицы.
-            select_columns: Поля результата списком.
-            filters: Фильтры списком объектов ``{column, operator, value/values}``.
-            derived_columns: Вычисляемые колонки списком объектов.
-            group_by: Поля группировки списком.
-            aggregations: Агрегаты списком объектов.
-            order_by: Сортировка списком объектов.
-            max_rows: Максимальное число строк результата.
-            include_schema: Нужно ли приложить схему результата в metadata DataFrame.
+            query: SQL-подобный запрос с alias таблицы, явным периодом и колонками результата.
 
         Returns:
             pandas DataFrame с результатом или текст ошибки, который агент может исправить.
         """
 
-        return _fake_read_table(
-            table_name=table_name,
-            select_columns=select_columns,
-            filters=filters,
-            derived_columns=derived_columns,
-            group_by=group_by,
-            aggregations=aggregations,
-            order_by=order_by,
-            max_rows=max_rows,
-            include_schema=include_schema,
-        )
+        try:
+            parsed = _parse_sql_like_query(query)
+        except ValueError as exc:
+            return f"Ошибка load_data: {exc}"
+
+        result = _fake_read_table(**parsed)
+        if hasattr(result, "attrs"):
+            result.attrs["spark_query_code"] = query.strip()
+            result.attrs["spark_is_aggregation"] = bool(parsed["aggregations"])
+        return result
 
     return [
         StructuredTool.from_function(
@@ -719,11 +701,9 @@ def _validate_columns(*, columns: list[str], available_columns: list[str], allow
     if forbidden:
         return (
             "Ошибка load_data: нельзя запрашивать все поля через '*' или 'all'.\n"
-            "Исправление: укажи минимальный список select_columns из skills или schema.\n"
-            "Пример точечного поиска: table_name='hits', "
-            "select_columns=['event_id', 'event_dt', 'event_time'], "
-            "filters=[{'column': 'event_id', 'operator': 'eq', 'value': '<event_id>'}], "
-            "max_rows=1."
+            "Исправление: в query укажи минимальный список колонок в SELECT.\n"
+            "Пример: LOAD hits\\nPERIOD event_dt FROM '20260101' TO '20260131'\\n"
+            "SELECT event_id, event_dt, event_time\\nWHERE event_id = '<event_id>'\\nLIMIT 1."
         )
     missing = sorted({column for column in normalized if column not in set(available_columns)})
     return _format_missing_columns(missing=missing, available_columns=available_columns) if missing else ""
@@ -740,16 +720,15 @@ def _format_empty_select_error() -> str:
     """
 
     return (
-        "Ошибка load_data: обычная выборка без select_columns запрещена. "
-        "Инструмент не выполняет SELECT * и не принимает вызов только с table_name.\n"
-        "Исправление для чтения строк: добавь select_columns с минимально нужными полями "
-        "и, если есть ключ из задачи, добавь filters.\n"
-        "Пример точечного поиска по event_id: table_name='hits', "
-        "select_columns=['event_id', 'event_dt', 'event_time'], "
-        "filters=[{'column': 'event_id', 'operator': 'eq', 'value': '<event_id>'}], "
-        "max_rows=1.\n"
-        "Исправление для расчёта: вместо select_columns передай aggregations, например "
-        "[{'function': 'count', 'column': 'event_id', 'alias': 'events_count'}]."
+        "Ошибка load_data: обычная выборка без явного SELECT запрещена. "
+        "Инструмент не выполняет SELECT *.\n"
+        "Исправление для чтения строк: добавь в query SELECT с минимально нужными полями "
+        "и, если есть ключ из задачи, добавь WHERE.\n"
+        "Пример точечного поиска по event_id: LOAD hits\\n"
+        "PERIOD event_dt FROM '20260101' TO '20260131'\\n"
+        "SELECT event_id, event_dt, event_time\\nWHERE event_id = '<event_id>'\\nLIMIT 1.\n"
+        "Исправление для расчёта: укажи агрегат прямо в SELECT, например "
+        "SELECT event_description, count(event_id) AS events_count."
     )
 
 
@@ -768,7 +747,7 @@ def _format_missing_columns(*, missing: list[str], available_columns: list[str])
         "Ошибка load_data: в таблице нет колонок из запроса.\n"
         f"Отсутствующие поля: {', '.join(missing)}.\n"
         f"Доступные поля ({len(available_columns)}): {', '.join(available_columns)}.\n"
-        "Исправление: выбери существующие поля из списка выше или проверь нужную таблицу "
+        "Исправление: перепиши query с существующими полями из списка выше или проверь нужный alias "
         "по skills; не повторяй тот же набор отсутствующих колонок."
     )
 

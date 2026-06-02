@@ -1,11 +1,11 @@
-"""Схемы структурированных аргументов для инструмента ``load_data``.
+"""Схемы аргументов для инструмента ``load_data``.
 
 Содержит:
 - FilterCondition: схема одного фильтра строк таблицы.
 - DerivedColumnSpec: схема одной вычисляемой колонки.
 - AggregationSpec: схема одного агрегата.
 - OrderBySpec: схема одного правила сортировки.
-- ReadTableInput: полная схема аргументов инструмента ``load_data``.
+- ReadTableInput: схема одного SQL-подобного запроса инструмента ``load_data``.
 """
 
 from __future__ import annotations
@@ -105,112 +105,46 @@ class OrderBySpec(BaseModel):
 
 
 class ReadTableInput(BaseModel):
-    """Структурированные аргументы инструмента чтения данных ``load_data``.
+    """Аргументы инструмента чтения данных ``load_data``.
 
     Args:
-        table_name: Короткое имя таблицы.
-        select_columns: Колонки результата для обычной выборки.
-        filters: Список фильтров.
-        derived_columns: Список вычисляемых колонок.
-        group_by: Колонки группировки.
-        aggregations: Список агрегатов.
-        order_by: Правила сортировки.
-        max_rows: Максимальное число строк результата.
-        include_schema: Нужно ли приложить схему результата.
+        query: SQL-подобный текст запроса с alias таблицы, явным периодом и колонками результата.
 
     Returns:
-        Валидированные аргументы для ``load_data``.
+        Валидированный SQL-подобный запрос для ``load_data``.
     """
 
-    table_name: str = Field(
-        description="Короткое имя таблицы. Пример: hits. Допустимые alias: hits, cards, uko, history_automarking, demo_client_timeline.",
-        examples=["hits"],
-    )
-    select_columns: list[str] = Field(
-        default_factory=list,
+    query: str = Field(
         description=(
-            "Обязательные колонки результата для обычной выборки. "
-            "Не оставляй пустым без aggregations; не используй '*' и 'all'. "
-            "Пример: ['event_id', 'event_dt', 'event_time']."
-        ),
-        examples=[["event_id", "event_dt", "event_time"]],
-    )
-    filters: list[FilterCondition] = Field(
-        default_factory=list,
-        description=(
-            "Фильтры строк таблицы. "
-            "Пример: [{'column': 'event_id', 'operator': 'eq', 'value': '3486d84b-4eba-4ba4-b044-94764fc9e7a4'}]."
+            "SQL-подобный запрос. Обязателен alias таблицы, явный SELECT без '*', "
+            "и обязательный период через PERIOD <date_column> FROM 'YYYYMMDD' TO 'YYYYMMDD'."
         ),
         examples=[
-            [{"column": "event_id", "operator": "eq", "value": "3486d84b-4eba-4ba4-b044-94764fc9e7a4"}]
+            (
+                "LOAD uko\n"
+                "PERIOD event_dt FROM '20260101' TO '20260131'\n"
+                "SELECT event_id, event_dt, event_description\n"
+                "WHERE event_description CONTAINS 'фон'"
+            )
         ],
-    )
-    derived_columns: list[DerivedColumnSpec] = Field(
-        default_factory=list,
-        description=(
-            "Вычисляемые колонки. "
-            "Пример: [{'name': 'event_month', 'source_column': 'event_dt', 'operation': 'year_month'}]."
-        ),
-        examples=[[{"name": "event_month", "source_column": "event_dt", "operation": "year_month"}]],
-    )
-    group_by: list[str] = Field(
-        default_factory=list,
-        description="Колонки группировки. Пример: ['event_description'].",
-        examples=[["event_description"]],
-    )
-    aggregations: list[AggregationSpec] = Field(
-        default_factory=list,
-        description=(
-            "Агрегаты для расчёта. "
-            "Пример: [{'function': 'count', 'column': 'event_id', 'alias': 'events_count'}]."
-        ),
-        examples=[[{"function": "count", "column": "event_id", "alias": "events_count"}]],
-    )
-    order_by: list[OrderBySpec] = Field(
-        default_factory=list,
-        description="Правила сортировки результата. Пример: [{'column': 'event_dt', 'direction': 'asc'}].",
-        examples=[[{"column": "event_dt", "direction": "asc"}]],
-    )
-    max_rows: int | None = Field(
-        default=None,
-        ge=0,
-        description="Максимальное число строк результата. Пример для точечного поиска: 1.",
-        examples=[1],
-    )
-    include_schema: bool = Field(
-        default=False,
-        description="Если True, добавить схему результата в metadata. Пример: false.",
-        examples=[False],
     )
 
     @model_validator(mode="after")
-    def validate_select_or_aggregations(self) -> "ReadTableInput":
-        """Проверяет, что обычная выборка не превращается в неявный ``SELECT *``.
+    def validate_query_text(self) -> "ReadTableInput":
+        """Проверяет, что запрос не пустой.
 
         Args:
             Отсутствуют. Метод использует поля текущей модели.
 
         Returns:
-            Текущую модель, если указан явный список колонок или агрегаты.
+            Текущую модель, если передан непустой текст запроса.
 
         Raises:
-            ValueError: Вызов ``load_data`` не содержит ни ``select_columns``, ни ``aggregations``.
+            ValueError: Вызов ``load_data`` содержит пустой запрос.
         """
 
-        normalized_select_columns = [str(column).strip() for column in self.select_columns if str(column).strip()]
-        forbidden_columns = {column.lower() for column in normalized_select_columns} & {"*", "all"}
-        if forbidden_columns:
-            raise ValueError(
-                "select_columns не может содержать '*' или 'all'. "
-                "Укажи минимальный список конкретных колонок результата."
-            )
-        has_select_columns = bool(normalized_select_columns)
-        has_aggregations = bool(self.aggregations)
-        if not has_select_columns and not has_aggregations:
-            raise ValueError(
-                "Для load_data обязательно укажи select_columns или aggregations. "
-                "Вызов только с table_name запрещён, потому что SELECT * не поддерживается."
-            )
+        if not self.query.strip():
+            raise ValueError("Для load_data обязательно передай непустой SQL-подобный query.")
         return self
 
 

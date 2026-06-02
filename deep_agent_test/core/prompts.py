@@ -393,58 +393,54 @@ _DATA_RETRIEVAL_PROMPT_CORE = """
 <load_data>
 ## load_data
 
-Используй только `load_data`. При вызове передавай:
-- `table_name` — только короткий alias таблицы из skills (`hits`, `cards`, `uko`,
-  `history_automarking`, `demo_client_timeline`); полные Spark-имена, пути и view
-  запрещены, инструмент сам подставит внутреннее имя источника;
-  запрещено передавать сюда `saved_file`, `virtual_file`, путь к `.pkl`, путь к файлу,
-  имя artifact или строку, похожую на имя выгрузки. Если значение содержит `.pkl`,
-  `/tool_outputs/`, `runs/`, `:\`, `.parquet`, `.avro`, `.json.gz` или длинный UUID,
-  это не таблица, а сохранённый результат; его нужно обрабатывать через
-  `execute_python_code`, а не через `load_data`.
-- `select_columns` — обязательный массив подтверждённых колонок для обычной выборки,
-  например `["event_id", "event_dt", "age_category"]`. Вызов `load_data` только с
-  `table_name` запрещён: инструмент не выполняет `SELECT *`;
-- `filters` — массив объектов без плейсхолдеров, например
-  `[{"column": "event_dt", "operator": "between", "values": ["20260101", "20260131"]}]`;
-- `include_schema=true` — только вместе с явными `select_columns` или `aggregations`,
-  чтобы приложить схему результата. Не используй `include_schema` как способ обойти
-  обязательный `select_columns`;
-- `group_by` — массив колонок группировки;
-- `aggregations` — массив объектов вида
-  `{"function": "count", "column": "event_id", "alias": "hits_count"}`;
-- `order_by` — массив объектов вида `{"column": "hits_count", "direction": "desc"}`;
-- `derived_columns` — массив объектов вида
-  `{"name": "event_month", "source_column": "event_dt", "operation": "year_month"}`.
+Используй только `load_data`. У инструмента один аргумент: `query`.
+В `query` передавай SQL-подобный запрос, который ты сам составляешь по skills:
 
-Операторы фильтров: eq, ne, gt, gte, lt, lte, contains, in, between, is_null, not_null.
-Функции агрегаций: count, count_distinct, min, max, sum, mean.
-Операции derived_columns: year, month, year_month, date, lower, upper, length, abs.
+```text
+LOAD <table_alias>
+PERIOD <date_column> FROM '<YYYYMMDD>' TO '<YYYYMMDD>'
+SELECT <column_1>, <column_2>, ...
+WHERE <column> = '<value>' AND <column> CONTAINS '<value>'
+GROUP BY <column>
+ORDER BY <column> ASC|DESC
+LIMIT <int>
+```
+
+Правила:
+- `LOAD` — только короткий alias таблицы из skills: `hits`, `cards`, `uko`,
+  `history_automarking`, `demo_client_timeline`. Полные Spark-имена, пути, view,
+  `saved_file`, `virtual_file`, `.pkl`, `/tool_outputs/`, `runs/`, `.parquet`,
+  `.avro`, `.json.gz` и длинные UUID запрещены в `LOAD`.
+- `PERIOD` обязателен для каждой выборки. Если периода, даты начала или даты конца нет,
+  не вызывай `load_data`: верни `needs_more_input`.
+- `SELECT` обязателен и должен содержать только подтверждённые колонки из skills/schema.
+  `SELECT *` и `SELECT all` запрещены.
+- Для агрегаций пиши агрегаты прямо в `SELECT`, например
+  `SELECT event_description, count(event_id) AS events_count`.
+- Обычные фильтры пиши в `WHERE`. Поддерживаются `=`, `!=`, `<>`, `>`, `>=`, `<`, `<=`,
+  `CONTAINS`, `IN (...)`, `BETWEEN`.
+- `GROUP BY`, `ORDER BY` и `LIMIT` добавляй только если они нужны задаче.
 
 Идентификаторы передавай строками, если их числовой тип явно не подтверждён, чтобы не
 терять точность у длинных ключей. Форматы дат и времени бери из schema, skill или tool
 output, а не угадывай.
 
-`max_rows` либо не указывай вообще (тогда вернутся все строки и сработает offload), либо
-передавай целое число. Не передавай строку `"None"` или текстовые плейсхолдеры — это
-ломает вызов и провоцирует повторы.
+`LIMIT` либо не указывай вообще (тогда вернутся все строки и сработает offload), либо
+передавай целое число. Не передавай текстовые плейсхолдеры — это ломает вызов и
+провоцирует повторы.
 
 Один вызов `load_data` на одну выборку. Не дублируй несколько одинаковых `load_data`
 (ни параллельно в одном ответе, ни подряд) — это не повышает полноту, а только засоряет
 контекст. Если обязательного ключа, фильтра, периода или подтверждения поля нет — верни
 `needs_more_input` или `schema_error` вместо широкой выборки. Идентичный `load_data` с
-теми же параметрами не повторяй.
+тем же `query` не повторяй.
 
-Если tool вернул ошибку валидации из-за отсутствующих `select_columns`, отсутствующего
-поля или неверного оператора, допустим один исправленный вызов того же `load_data` с
-существенно исправленными аргументами. Исправленный вызов должен устранять причину ошибки:
-добавить явные `select_columns`, заменить отсутствующие поля на существующие или исправить
-оператор/тип фильтра. Повтор с теми же аргументами запрещён.
+Если tool вернул ошибку валидации из-за отсутствующего `PERIOD`, отсутствующего `SELECT`,
+отсутствующего поля или неверного оператора, допустим один исправленный вызов того же
+`load_data` с существенно исправленным `query`. Повтор с тем же `query` запрещён.
 
 Шаблон точечного поиска строки по `event_id`:
-`table_name="hits"`, `select_columns=["event_id", "event_dt", "event_time"]`,
-`filters=[{"column": "event_id", "operator": "eq", "value": "<event_id>"}]`,
-`max_rows=1`.
+`query="LOAD hits\nPERIOD event_dt FROM '20260101' TO '20260131'\nSELECT event_id, event_dt, event_time\nWHERE event_id = '<event_id>'\nLIMIT 1"`.
 </load_data>
 
 <reuse_offloaded_pkl>
