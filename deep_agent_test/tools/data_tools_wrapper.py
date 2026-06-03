@@ -20,6 +20,27 @@
 
 Сам базовый инструмент не меняется: вся прозрачность добавляется здесь, в слое
 ``deep_agent_test``.
+
+Содержит функции:
+- wrap_data_tools_with_query_code: оборачивает список data-tools.
+- _wrap_single_tool: создает прозрачную обертку над одним data-tool.
+- _call_base_tool: синхронно вызывает базовый data-tool без вложенного callback-события.
+- _call_base_tool_async: асинхронно вызывает базовый data-tool без вложенного callback-события.
+- _format_result: готовит content/artifact для ответа инструмента.
+- _build_success_content: строит текст успешного результата.
+- _dataframe_to_rows: преобразует DataFrame в JSON-записи.
+- _clean_scalar: приводит pandas/numpy scalar к JSON-совместимому значению.
+- _build_query_code: строит человекочитаемый SQL-подобный код запроса.
+- _build_where_clause: преобразует фильтры в SQL-подобный WHERE.
+- _build_predicate: строит один SQL-подобный предикат фильтра.
+- _format_derived_columns: форматирует вычисляемые колонки.
+- _format_aggregations: форматирует агрегации.
+- _format_order_by: форматирует сортировки.
+- _literal: форматирует литерал для SQL-подобного текста.
+- _parse_columns: разбирает список колонок.
+- _split_instruction_text: разбирает список инструкций.
+- _as_list: приводит значение к списку.
+- _get: читает поле из dict или объекта.
 """
 
 from __future__ import annotations
@@ -57,13 +78,13 @@ def _wrap_single_tool(tool: BaseTool) -> BaseTool:
     async def _arun(**kwargs: Any) -> tuple[str, Any]:
         """Асинхронно вызывает базовый tool и оборачивает результат в (content, artifact)."""
 
-        raw = await tool.ainvoke(kwargs)
+        raw = await _call_base_tool_async(tool=tool, kwargs=kwargs)
         return _format_result(kwargs, raw)
 
     def _run(**kwargs: Any) -> tuple[str, Any]:
         """Синхронно вызывает базовый tool и оборачивает результат в (content, artifact)."""
 
-        raw = tool.invoke(kwargs)
+        raw = _call_base_tool(tool=tool, kwargs=kwargs)
         return _format_result(kwargs, raw)
 
     factory_kwargs: dict[str, Any] = {
@@ -80,6 +101,43 @@ def _wrap_single_tool(tool: BaseTool) -> BaseTool:
         # Базовый инструмент без явного func/coroutine — поддержим хотя бы async-путь.
         factory_kwargs["coroutine"] = _arun
     return StructuredTool.from_function(**factory_kwargs)
+
+
+def _call_base_tool(*, tool: BaseTool, kwargs: dict[str, Any]) -> Any:
+    """Вызывает базовый data-tool без вложенного LangChain callback-события.
+
+    Args:
+        tool: Исходный инструмент чтения данных, который оборачивается слоем прозрачности.
+        kwargs: Аргументы вызова инструмента после валидации схемы LangChain.
+
+    Returns:
+        Сырой результат базового инструмента: DataFrame, текст ошибки или другой поддержанный объект.
+    """
+
+    func = getattr(tool, "func", None)
+    if callable(func):
+        return func(**kwargs)
+    return tool.invoke(kwargs, config={"callbacks": []})
+
+
+async def _call_base_tool_async(*, tool: BaseTool, kwargs: dict[str, Any]) -> Any:
+    """Асинхронно вызывает базовый data-tool без вложенного LangChain callback-события.
+
+    Args:
+        tool: Исходный инструмент чтения данных, который оборачивается слоем прозрачности.
+        kwargs: Аргументы вызова инструмента после валидации схемы LangChain.
+
+    Returns:
+        Сырой результат базового инструмента: DataFrame, текст ошибки или другой поддержанный объект.
+    """
+
+    coroutine = getattr(tool, "coroutine", None)
+    if callable(coroutine):
+        return await coroutine(**kwargs)
+    func = getattr(tool, "func", None)
+    if callable(func):
+        return func(**kwargs)
+    return await tool.ainvoke(kwargs, config={"callbacks": []})
 
 
 _TRANSPARENCY_NOTE = (

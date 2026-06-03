@@ -36,7 +36,6 @@
 - `sub_type` - подтип.
 - `type_operation` - тип операции.
 - `transaction_amount` - сумма.
-- `transaction_amount_in_rub` - сумма в рублях.
 - `transaction_amount_currency` - валюта.
 - `transaction_sender_account_number` - счет отправителя.
 - `transaction_beneficiar_account_number` - счет получателя.
@@ -73,4 +72,3 @@
 - `phone_os` - ОС телефона.
 - `version_mp` - версия мобильного приложения.
 - `channel_ext_system` - внешняя система канала.
-

@@ -25,6 +25,8 @@
 - `transaction_amount` - сумма.
 - `transaction_amount_currency` - валюта.
 
+В `uko` нет поля `transaction_amount_in_rub`; не добавляй его в SELECT.
+
 ## Клиент
 
 - `first_name` - имя.
@@ -92,4 +94,3 @@
 - `scoring_oss` - скоринг OSS.
 - `indicators_sbp` - индикаторы СБП.
 - `params` - параметры события.
-

@@ -38,7 +38,7 @@ from typing import Any
 import pandas as pd
 from langchain_core.tools import BaseTool, StructuredTool
 
-from deep_agent_test.tools.data_query_schema import ReadTableInput
+from deep_agent_test.tools.data_query_schema import ReadTableInput, normalize_filter_operator
 from deep_agent_test.tools.spark_data import READ_TABLE_DESCRIPTION, _extract_query_args_with_llm
 
 FAKE_DATA_ROOT = Path(__file__).resolve().parents[2] / "data"
@@ -508,7 +508,7 @@ def _parse_filter_item(item: Any) -> tuple[str, str, str]:
 
     if not isinstance(item, str):
         column = str(_get_field(item, "column") or "").strip()
-        operator = str(_get_field(item, "operator") or "eq").strip().lower()
+        operator = normalize_filter_operator(_get_field(item, "operator"))
         values = _get_field(item, "values") or []
         value = _get_field(item, "value")
         if operator not in _FILTER_OPERATORS:
@@ -519,22 +519,28 @@ def _parse_filter_item(item: Any) -> tuple[str, str, str]:
         elif operator == "between":
             raw_value = ",".join(str(part) for part in values)
         else:
-            raw_value = "" if value is None else str(value)
+            if value is not None:
+                raw_value = str(value)
+            elif values:
+                raw_value = str(values[0])
+            else:
+                raw_value = ""
         if not column:
             raise ValueError(f"В фильтре не указана колонка: {item}")
         if operator not in {"is_null", "not_null"} and not raw_value:
             raise ValueError(f"Для фильтра {item!r} нужно передать value или values.")
         return column, operator, raw_value
 
-    if "=" in item and not re.search(r"\s(eq|ne|gt|gte|lt|lte|contains|in|between)\s", item, flags=re.I):
-        column, value = item.split("=", 1)
-        return column.strip(), "eq", value.strip()
+    symbolic_match = re.fullmatch(r"\s*([A-Za-z_][\w.]*)\s*(==|=|!=|<>|>=|<=|>|<)\s*(.+)\s*", item)
+    if symbolic_match is not None:
+        column, operator, value = symbolic_match.groups()
+        return column.strip(), normalize_filter_operator(operator), value.strip()
 
     parts = item.split(None, 2)
     if len(parts) < 2:
         raise ValueError(f"Некорректный фильтр: {item}")
     column = parts[0].strip()
-    operator = parts[1].strip().lower()
+    operator = normalize_filter_operator(parts[1])
     if operator not in _FILTER_OPERATORS:
         raise ValueError(f"Неподдерживаемый оператор фильтра: {operator}")
     value = parts[2].strip() if len(parts) > 2 else ""

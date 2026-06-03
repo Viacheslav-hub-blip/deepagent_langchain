@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 ScalarValue = str | int | float | bool
 FilterOperator = Literal[
@@ -36,6 +36,57 @@ SortDirection = Literal["asc", "desc"]
 TableAlias = Literal["hits", "cards", "uko", "history_automarking", "demo_client_timeline"]
 QueryParseStatus = Literal["ready", "needs_more_input", "schema_error"]
 
+FILTER_OPERATOR_ALIASES: dict[str, str] = {
+    "=": "eq",
+    "==": "eq",
+    "eq": "eq",
+    "equal": "eq",
+    "equals": "eq",
+    "is": "eq",
+    "!=": "ne",
+    "<>": "ne",
+    "ne": "ne",
+    "not_equal": "ne",
+    "not_equals": "ne",
+    ">": "gt",
+    "gt": "gt",
+    ">=": "gte",
+    "ge": "gte",
+    "gte": "gte",
+    "<": "lt",
+    "lt": "lt",
+    "<=": "lte",
+    "le": "lte",
+    "lte": "lte",
+    "like": "contains",
+    "contains": "contains",
+    "contains_any": "contains_any",
+    "in": "in",
+    "between": "between",
+    "is_null": "is_null",
+    "is null": "is_null",
+    "null": "is_null",
+    "not_null": "not_null",
+    "is not null": "not_null",
+    "not null": "not_null",
+}
+
+
+def normalize_filter_operator(value: object) -> str:
+    """Приводит пользовательский алиас оператора фильтра к каноническому имени.
+
+    Args:
+        value: Оператор из JSON-разбора LLM или строкового фильтра.
+
+    Returns:
+        Канонический оператор ``eq``, ``ne``, ``gt``, ``gte``, ``lt``, ``lte``,
+        ``contains``, ``contains_any``, ``in``, ``between``, ``is_null`` или ``not_null``.
+    """
+
+    text = str(value or "eq").strip().lower().replace("-", "_")
+    text = " ".join(text.split())
+    return FILTER_OPERATOR_ALIASES.get(text, text)
+
 
 class FilterCondition(BaseModel):
     """Один фильтр для отбора строк таблицы.
@@ -52,7 +103,15 @@ class FilterCondition(BaseModel):
     """
 
     column: str = Field(description="Имя колонки для фильтра. Пример: event_id.", examples=["event_id"])
-    operator: FilterOperator = Field(description="Оператор фильтра. Пример: eq.", examples=["eq"])
+    operator: FilterOperator = Field(
+        description=(
+            "Оператор фильтра. Канонические значения: eq, ne, gt, gte, lt, lte, contains, "
+            "contains_any, in, between, is_null, not_null. Допустимые алиасы автоматически "
+            "нормализуются: '=', '==', 'equals' -> eq; '!=', '<>', 'not_equals' -> ne; "
+            "'>', '>=', '<', '<=' -> gt/gte/lt/lte; 'LIKE' -> contains."
+        ),
+        examples=["eq", "equals", "="],
+    )
     value: ScalarValue | None = Field(
         default=None,
         description="Одно значение фильтра для eq, ne, gt, gte, lt, lte или contains. Пример: 3486d84b-4eba-4ba4-b044-94764fc9e7a4.",
@@ -63,6 +122,20 @@ class FilterCondition(BaseModel):
         description="Список значений для операторов in, between и contains_any. Пример: ['20260101', '20260131'].",
         examples=[["20260101", "20260131"]],
     )
+
+    @field_validator("operator", mode="before")
+    @classmethod
+    def normalize_operator(cls, value: object) -> str:
+        """Нормализует алиасы операторов до значений, которые использует инструмент.
+
+        Args:
+            value: Оператор фильтра из результата LLM-разбора.
+
+        Returns:
+            Каноническое имя оператора для внутренней выборки.
+        """
+
+        return normalize_filter_operator(value)
 
 
 class DerivedColumnSpec(BaseModel):
@@ -159,8 +232,10 @@ class ReadTableInput(BaseModel):
 
     query: str = Field(
         description=(
-            "SQL-подобный запрос. Обязателен alias таблицы, явный SELECT без '*', "
-            "и обязательный период через PERIOD <date_column> FROM 'YYYYMMDD' TO 'YYYYMMDD'."
+            "SQL-подобный запрос. Обязателен короткий alias таблицы, явный SELECT без '*', "
+            "и обязательный период через PERIOD <date_column> FROM 'YYYYMMDD' TO 'YYYYMMDD'. "
+            "Фильтры записывай в WHERE обычными SQL-операторами: =, !=, <>, >, >=, <, <=, "
+            "LIKE, CONTAINS, IN, BETWEEN."
         ),
         examples=[
             (
@@ -196,6 +271,7 @@ __all__ = [
     "AggregationSpec",
     "DerivedColumnSpec",
     "DerivedOperation",
+    "FILTER_OPERATOR_ALIASES",
     "FilterCondition",
     "FilterOperator",
     "OrderBySpec",
@@ -205,4 +281,5 @@ __all__ = [
     "ScalarValue",
     "SortDirection",
     "TableAlias",
+    "normalize_filter_operator",
 ]

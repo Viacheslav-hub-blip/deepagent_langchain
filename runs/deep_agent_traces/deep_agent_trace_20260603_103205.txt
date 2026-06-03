@@ -1,0 +1,82 @@
+
+
+===== LLM REQUEST #1 =====
+timestamp: 2026-06-03T10:32:05
+messages_count: 2
+tools_count: 0
+messages_chars: 2642
+messages_tokens_estimate: 662
+tools_chars: 2
+tools_tokens_estimate: 1
+total_tokens_estimate: 663
+
+messages_table:
+index | role | class | chars | tokens_est | tool_calls | name
+1 | system | SystemMessage | 257 | 65 | 0 | 
+2 | user | HumanMessage | 2385 | 597 | 0 |
+
+
+===== LLM REQUEST #1 TOOLS (0) =====
+(tools не переданы)
+
+
+===== LLM REQUEST #1 MESSAGE #1 =====
+request: 1
+index: 1
+role: system
+class: SystemMessage
+chars: 257
+tokens_estimate: 65
+content:
+Ты выбираешь domain skills для предварительной загрузки по запросу пользователя. Используй только пути из переданного index. Выбирай минимально полезный набор skills для выполнения запроса. В selection_reason кратко объясни, почему выбран именно этот набор.
+
+
+===== LLM REQUEST #1 MESSAGE #2 =====
+request: 1
+index: 2
+role: user
+class: HumanMessage
+chars: 2385
+tokens_estimate: 597
+content:
+{
+  "user_query": "что делал клиент в день сработки и за день до сработки? id сработки 3486d84b-4eba-4ba4-b044-94764fc9e7a4",
+  "skills_index": [
+    {
+      "path": "/skills/average-transaction-by-rule/SKILL.md",
+      "name": "average-transaction-by-rule",
+      "description": "Workflow расчета статистики суммы транзакций по правилу антифрода в hits.",
+      "keywords": "средняя сумма, минимум, максимум, статистика суммы, transaction_amount, transaction_amount_in_rub, main_rule, правило антифрода"
+    },
+    {
+      "path": "/skills/cards-event-table/SKILL.md",
+      "name": "cards-event-table",
+      "description": "Краткая карточка источника cards: raw-история карточного канала, POS, e-commerce, ATM, merchant/MCC и связь с hits.",
+      "keywords": "cards, карточные операции, POS, ecommerce, e-commerce, ATM, merchant, MCC, card_number, atm_merchant_name, raw-история"
+    },
+    {
+      "path": "/skills/field-descriptions/SKILL.md",
+      "name": "field-descriptions",
+      "description": "Индекс справочников полей. Используй только когда пользователь спрашивает смысл поля или нужен редкий столбец.",
+      "keywords": "описание поля, смысл поля, справочник полей, fields.md, schema_error, редкий столбец, список колонок"
+    },
+    {
+      "path": "/skills/hit-table/SKILL.md",
+      "name": "hit-table",
+      "description": "Краткая карточка источника hits: сработки антифрода, правила, решения, save/fp, жалобы и связь с raw-таблицами.",
+      "keywords": "hits, сработки, алерты, антифрод, правила, main_rule, policy_action, resolution, save, fp, жалобы, event_description"
+    },
+    {
+      "path": "/skills/poisk-zapisey-po-opisaniyu/SKILL.md",
+      "name": "poisk-zapisey-po-opisaniyu",
+      "description": "Workflow поиска записей по смысловому описанию: доставка, такси, подписки, образование, маркетплейсы и другие категории.",
+      "keywords": "event_description, смысловое описание, категории, образование, обучение, курсы, экзамен, репетитор, доставка, такси, подписки, маркетплейсы"
+    },
+    {
+      "path": "/skills/uko-event-table/SKILL.md",
+      "name": "uko-event-table",
+      "description": "Краткая карточка источника uko: raw-история ДБО/СБП/переводов, счетов, устройства, IP и связь с hits.",
+      "keywords": "uko, ДБО, СБП, переводы, счета, мобильное приложение, device, hardware_id, ip_device, получатель, raw-история"
+    }
+  ]
+}

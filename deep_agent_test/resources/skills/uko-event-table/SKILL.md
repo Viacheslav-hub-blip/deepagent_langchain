@@ -64,6 +64,7 @@ keywords: "uko, ДБО, СБП, переводы, счета, мобильное
 - Никогда не фильтруй `uko.event_time` значением `event_time` из `hits`.
 - Для точного читаемого времени используй `event_dttm_readable`.
 - Для связи с `hits` используй `event_id`, либо fallback `epk_id` + `event_dt`.
+- В `uko` нет поля `transaction_amount_in_rub`; для суммы используй `transaction_amount`, для валюты - `transaction_amount_currency`.
 
 ## Дополнительный контекст
 

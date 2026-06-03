@@ -21,7 +21,9 @@ from deep_agent_test.core.trace_logging import FileTraceCallbackHandler, build_t
 from deep_agent_test.tools.fake_spark_data import build_fake_spark_data_tools
 from model import model
 
-USER_MESSAGE = "что делал клиент в день сработки и за день до сработки? id сработки 3486d84b-4eba-4ba4-b044-94764fc9e7a4"
+#USER_MESSAGE = "что делал клиент в день сработки и за день до сработки? id сработки 3486d84b-4eba-4ba4-b044-94764fc9e7a4"
+USER_MESSAGE = "найди все сработки связанные с образованием за январь 2026"
+#USER_MESSAGE = "построй график распределения количества сработок по age category за январь 2026"
 
 TOOL_STATUS_LABELS = {
     "write_todos": "Составляю план",
@@ -135,9 +137,9 @@ def _print_tool_call_progress(tool_call: Any, *, prefix: str = "") -> None:
     """
 
     tool_name = str(getattr(tool_call, "tool_name", "") or "")
-    print(f"{prefix}{_tool_call_status(tool_name, getattr(tool_call, 'input', None))}")
     if tool_name == "task":
         return
+    print(f"{prefix}{_tool_call_status(tool_name, getattr(tool_call, 'input', None))}")
     for _ in tool_call.output_deltas:
         pass
     label = TOOL_STATUS_LABELS.get(tool_name, f"Инструмент {tool_name}")

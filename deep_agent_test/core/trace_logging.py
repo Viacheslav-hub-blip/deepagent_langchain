@@ -102,19 +102,6 @@ class FileTraceCallbackHandler(BaseCallbackHandler):
 
         content = _message_content(message)
         self._append_section("AGENT RESPONSE", content or "(пустой ответ)")
-        for tool_call in getattr(message, "tool_calls", []) or []:
-            if not isinstance(tool_call, dict):
-                continue
-            self._append_section(
-                "TOOL CALL",
-                "\n".join(
-                    [
-                        f"name: {tool_call.get('name') or '(unknown)'}",
-                        "args:",
-                        _format_json(tool_call.get("args") or {}),
-                    ]
-                ),
-            )
 
     def on_tool_start(
         self,

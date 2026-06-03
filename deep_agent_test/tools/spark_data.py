@@ -35,21 +35,33 @@ from typing import Any
 
 from langchain_core.tools import BaseTool, StructuredTool
 
-from deep_agent_test.tools.data_query_schema import ParsedDataQuery, ReadTableInput
+from deep_agent_test.tools.data_query_schema import ParsedDataQuery, ReadTableInput, normalize_filter_operator
 
 READ_TABLE_DESCRIPTION = (
     "load_data\n"
     "---\n"
-    "Описание: универсальная выборка из Spark-таблиц. "
-    "Инструмент принимает один параметр query: SQL-подобный текст запроса. "
-    "Агент сам пишет запрос по известным ему skills, внутренний LLM нормализует query "
-    "в структурированные аргументы, затем инструмент проверяет обязательный период и выполняет выборку. "
-    "При успешной выборке возвращает pandas DataFrame.\n"
-    "Выгрузка всех столбцов запрещена: SELECT * и SELECT all не выполняются. "
-    "Период выборки обязателен для каждого запроса.\n\n"
+    "Описание: универсальная безопасная выборка из доступных Spark-таблиц по короткому alias. "
+    "Инструмент принимает один параметр query: SQL-подобный текст запроса. Агент пишет query по skills, "
+    "а внутренний нормализатор преобразует его в структурированные аргументы и выполняет выборку. "
+    "При успешной выборке возвращается pandas DataFrame с полным результатом запроса.\n\n"
+    "Когда использовать:\n"
+    "- нужно прочитать строки, события или агрегаты из таблиц hits, cards, uko, history_automarking "
+    "или demo_client_timeline;\n"
+    "- известны таблица, период, нужные колонки и фильтры по ключам/значениям;\n"
+    "- нужно проверить наличие записей, получить фактические поля события или посчитать агрегат "
+    "по данным источника.\n\n"
+    "Когда не использовать:\n"
+    "- нет периода, даты начала или даты конца: сначала запроси недостающие данные;\n"
+    "- нужно обработать уже выгруженный pickle/offload-файл: используй код поверх сохраненного результата, "
+    "а не повторный load_data;\n"
+    "- нужна произвольная Spark SQL-команда, join нескольких источников, запись данных, удаление данных "
+    "или изменение таблиц;\n"
+    "- требуется SELECT * / SELECT all: перечисли только нужные колонки.\n\n"
     "Параметры:\n"
-    "  query (str, обяз.) - SQL-подобный запрос в формате ниже.\n\n"
-    "Формат:\n"
+    "- query (str, обяз.): SQL-подобный запрос. В query обязательно укажи LOAD/FROM с коротким alias, "
+    "PERIOD или date BETWEEN, SELECT с явными колонками или агрегатами, при необходимости WHERE/GROUP BY/"
+    "ORDER BY/LIMIT.\n\n"
+    "Формат query:\n"
     "  LOAD <table_alias>\n"
     "  PERIOD <date_column> FROM '<YYYYMMDD>' TO '<YYYYMMDD>'\n"
     "  SELECT <column_1>, <column_2> [, COUNT(*) AS <alias>] [, count(<column>) AS <alias>]\n"
@@ -57,11 +69,20 @@ READ_TABLE_DESCRIPTION = (
     "  GROUP BY <column>\n"
     "  ORDER BY <column> ASC|DESC\n"
     "  LIMIT <int>\n\n"
-    "Допустимые alias: hits, cards, uko, history_automarking, demo_client_timeline. "
-    "Вместо LOAD можно использовать обычный FROM, но alias должен быть коротким. "
-    "Период задавай только через PERIOD или через WHERE <date_column> BETWEEN '<from>' AND '<to>'. "
-    "SELECT * и SELECT all запрещены для обычной выборки, но COUNT(*) разрешён. "
-    "Фильтры WHERE поддерживают =, !=, >, >=, <, <=, LIKE, CONTAINS, IN, BETWEEN, AND и OR."
+    "Допустимые таблицы: hits, cards, uko, history_automarking, demo_client_timeline. "
+    "Вместо LOAD можно использовать FROM, но имя источника должно быть коротким alias, а не Spark-путем, "
+    "именем файла, saved_file, virtual_file или pkl.\n\n"
+    "Операторы WHERE:\n"
+    "- равенство: =, ==, eq, equals -> внутренне нормализуется в eq;\n"
+    "- не равно: !=, <>, ne, not_equals -> ne;\n"
+    "- сравнения: >, >=, <, <=, gt, gte, lt, lte;\n"
+    "- текстовый поиск: LIKE '%value%' или CONTAINS 'value' -> contains;\n"
+    "- списки и интервалы: IN (...), BETWEEN <from> AND <to>;\n"
+    "- несколько условий можно соединять через AND и OR.\n\n"
+    "Ограничения:\n"
+    "- период обязателен для каждого запроса и задается через PERIOD или WHERE <date_column> BETWEEN '<from>' AND '<to>';\n"
+    "- SELECT * и SELECT all запрещены для обычной выборки, но COUNT(*) разрешен в агрегатах;\n"
+    "- длинные идентификаторы передавай строками в кавычках, чтобы не потерять точность."
 )
 
 _FILTER_OPERATORS = {
@@ -199,7 +220,11 @@ _QUERY_PARSER_SYSTEM_PROMPT = """
   {"function": "count", "column": "*", "alias": "..."}.
 - Если в query есть SELECT col1, col2, эти имена обязательно должны попасть в select_columns.
 - Не возвращай needs_more_input из-за отсутствия колонок, если после SELECT указаны колонки или агрегаты.
+- Равенство через `=`, `==`, `eq`, `equals`, `equal` преобразуй в operator="eq".
+- Неравенство через `!=`, `<>`, `ne`, `not_equals`, `not_equal` преобразуй в operator="ne".
+- Сравнения `>`, `>=`, `<`, `<=` преобразуй в operator="gt", "gte", "lt", "lte".
 - LIKE '%x%' преобразуй в operator="contains", value="x".
+- CONTAINS 'x' преобразуй в operator="contains", value="x".
 - Цепочку OR по одной колонке вида col LIKE '%a%' OR col LIKE '%b%' преобразуй в один
   фильтр operator="contains_any", values=["a", "b"].
 - IN (...) преобразуй в operator="in".
@@ -342,6 +367,8 @@ def _repair_parsed_query_with_llm(
         "Если в query есть SELECT col1, col2, скопируй эти имена в select_columns.\n"
         "Если в query есть COUNT(*) или count(col), перенеси это в aggregations.\n"
         "Если в query есть PERIOD date_col FROM 'start' TO 'end', добавь фильтр between по date_col.\n"
+        "Если в query есть равенство через =, ==, eq или equals, используй operator=\"eq\".\n"
+        "Если в query есть неравенство через !=, <> или not_equals, используй operator=\"ne\".\n"
         "Если первая строка содержит известный alias таблицы рядом с лишним словом или опечаткой, используй alias.\n"
         "Игнорируй посторонние SQL-символы и alias: <table>, AS t, t.column должны стать table и column.\n\n"
         f"Validation error:\n{validation_error}\n\n"
@@ -550,6 +577,7 @@ def _normalize_filter_item(item: dict[str, Any]) -> dict[str, Any]:
 
     result = dict(item)
     result["column"] = _normalize_column_name(result.get("column"))
+    result["operator"] = normalize_filter_operator(result.get("operator"))
     return result
 
 
@@ -611,7 +639,7 @@ def _has_required_period(filters: list[Any]) -> bool:
     """
 
     for item in filters:
-        operator = str(_get_field(item, "operator") or "").lower()
+        operator = normalize_filter_operator(_get_field(item, "operator"))
         values = _get_field(item, "values") or []
         value = _get_field(item, "value")
         if operator == "between" and len(values) == 2:
@@ -1009,7 +1037,7 @@ def _parse_filter_item(item: Any) -> tuple[str, str, str]:
 
     if not isinstance(item, str):
         column = str(_get_field(item, "column") or "").strip()
-        operator = str(_get_field(item, "operator") or "eq").strip().lower()
+        operator = normalize_filter_operator(_get_field(item, "operator"))
         values = _get_field(item, "values") or []
         value = _get_field(item, "value")
         if operator not in _FILTER_OPERATORS:
@@ -1020,22 +1048,28 @@ def _parse_filter_item(item: Any) -> tuple[str, str, str]:
         elif operator == "between":
             raw_value = ",".join(str(part) for part in values)
         else:
-            raw_value = "" if value is None else str(value)
+            if value is not None:
+                raw_value = str(value)
+            elif values:
+                raw_value = str(values[0])
+            else:
+                raw_value = ""
         if not column:
             raise ValueError(f"В фильтре не указана колонка: {item}")
         if operator not in {"is_null", "not_null"} and not raw_value:
             raise ValueError(f"Для фильтра {item!r} нужно передать value или values.")
         return column, operator, raw_value
 
-    if "=" in item and not re.search(r"\s(eq|ne|gt|gte|lt|lte|contains|in|between)\s", item, flags=re.I):
-        column, value = item.split("=", 1)
-        return column.strip(), "eq", value.strip()
+    symbolic_match = re.fullmatch(r"\s*([A-Za-z_][\w.]*)\s*(==|=|!=|<>|>=|<=|>|<)\s*(.+)\s*", item)
+    if symbolic_match is not None:
+        column, operator, value = symbolic_match.groups()
+        return column.strip(), normalize_filter_operator(operator), value.strip()
 
     parts = item.split(None, 2)
     if len(parts) < 2:
         raise ValueError(f"Некорректный фильтр: {item}")
     column = parts[0].strip()
-    operator = parts[1].strip().lower()
+    operator = normalize_filter_operator(parts[1])
     if operator not in _FILTER_OPERATORS:
         raise ValueError(f"Неподдерживаемый оператор фильтра: {operator}")
     value = parts[2].strip() if len(parts) > 2 else ""

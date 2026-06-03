@@ -37,7 +37,6 @@ keywords: "cards, карточные операции, POS, ecommerce, e-commerc
 - `sub_type`
 - `type_operation`
 - `transaction_amount`
-- `transaction_amount_in_rub`
 - `transaction_amount_currency`
 - `card_number`
 - `atm_merchant_name`
@@ -55,6 +54,7 @@ keywords: "cards, карточные операции, POS, ecommerce, e-commerc
 - Для связи с `hits` обычно достаточно `event_id`; fallback - `epk_id` + `event_dt`.
 - IP/гео полей меньше, чем в `uko`.
 - Не используй `cards` как источник антифрод-резолюций; резолюции находятся в `hits`.
+- В `cards` нет поля `transaction_amount_in_rub`; для суммы используй `transaction_amount`, для валюты - `transaction_amount_currency`.
 
 ## Дополнительный контекст
 
