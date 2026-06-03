@@ -416,9 +416,11 @@ LIMIT <int>
 - `SELECT` обязателен и должен содержать только подтверждённые колонки из skills/schema.
   `SELECT *` и `SELECT all` запрещены.
 - Для агрегаций пиши агрегаты прямо в `SELECT`, например
-  `SELECT event_description, count(event_id) AS events_count`.
+  `SELECT event_description, count(event_id) AS events_count`. `COUNT(*)` разрешён.
 - Обычные фильтры пиши в `WHERE`. Поддерживаются `=`, `!=`, `<>`, `>`, `>=`, `<`, `<=`,
-  `CONTAINS`, `IN (...)`, `BETWEEN`.
+  `LIKE`, `CONTAINS`, `IN (...)`, `BETWEEN`, `AND` и `OR`. Для нескольких синонимов
+  по одному полю можно писать обычный SQL-like `OR`, например
+  `event_description LIKE '%образование%' OR event_description LIKE '%обучение%'`.
 - `GROUP BY`, `ORDER BY` и `LIMIT` добавляй только если они нужны задаче.
 
 Идентификаторы передавай строками, если их числовой тип явно не подтверждён, чтобы не

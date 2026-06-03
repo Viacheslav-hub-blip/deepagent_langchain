@@ -1,6 +1,7 @@
 ---
 name: uko-event-table
 description: "Краткая карточка источника uko: raw-история ДБО/СБП/переводов, счетов, устройства, IP и связь с hits."
+keywords: "uko, ДБО, СБП, переводы, счета, мобильное приложение, device, hardware_id, ip_device, получатель, raw-история"
 ---
 
 # Таблица uko
@@ -70,4 +71,3 @@ description: "Краткая карточка источника uko: raw-ист
 - `/skills/hit-table/joins.md` - маршрут связи `hits` -> `cards` / `uko`.
 
 Читай `fields.md`, если нужны редкие поля устройства, IP, правил raw-события или schema error.
-

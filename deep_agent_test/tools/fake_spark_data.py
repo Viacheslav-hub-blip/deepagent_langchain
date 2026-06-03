@@ -3,7 +3,7 @@
 Содержит:
 - ReadTableInput: структурированная схема аргументов fake-инструмента ``load_data``.
 - build_fake_spark_data_tools: сборка LangChain tool поверх CSV-файлов из ``data``.
-- _parse_sql_like_query: разбор SQL-подобного запроса в аргументы выборки.
+- _extract_query_args_with_llm: LLM-разбор SQL-подобного запроса в аргументы выборки.
 - _fake_read_table: выполнение выборки через pandas DataFrame API.
 - _load_table_frame: чтение CSV-файла по жестко заданной карте таблиц.
 - _resolve_table_name: преобразование короткого alias таблицы в ключ CSV-файла.
@@ -39,7 +39,7 @@ import pandas as pd
 from langchain_core.tools import BaseTool, StructuredTool
 
 from deep_agent_test.tools.data_query_schema import ReadTableInput
-from deep_agent_test.tools.spark_data import READ_TABLE_DESCRIPTION, _parse_sql_like_query
+from deep_agent_test.tools.spark_data import READ_TABLE_DESCRIPTION, _extract_query_args_with_llm
 
 FAKE_DATA_ROOT = Path(__file__).resolve().parents[2] / "data"
 FAKE_TABLE_FILES: dict[str, str] = {
@@ -63,16 +63,29 @@ FAKE_TABLE_ALIASES: dict[str, str] = {
 
 FAKE_READ_TABLE_DESCRIPTION = READ_TABLE_DESCRIPTION
 
-_FILTER_OPERATORS = {"eq", "ne", "gt", "gte", "lt", "lte", "contains", "in", "between", "is_null", "not_null"}
+_FILTER_OPERATORS = {
+    "eq",
+    "ne",
+    "gt",
+    "gte",
+    "lt",
+    "lte",
+    "contains",
+    "contains_any",
+    "in",
+    "between",
+    "is_null",
+    "not_null",
+}
 _DERIVED_OPERATIONS = {"year", "month", "year_month", "date", "lower", "upper", "length", "abs"}
 _AGGREGATION_FUNCTIONS = {"count", "count_distinct", "min", "max", "sum", "mean"}
 
 
-def build_fake_spark_data_tools() -> list[BaseTool]:
+def build_fake_spark_data_tools(query_parser_model: Any | None = None) -> list[BaseTool]:
     """Создает временный fake ``load_data`` поверх CSV-файлов из папки ``data``.
 
     Args:
-        Отсутствуют. Папка ``data`` и имена таблиц заданы хардкодом в этом модуле.
+        query_parser_model: Chat-модель LangChain для внутреннего разбора SQL-подобного ``query``.
 
     Returns:
         Список с одним LangChain tool ``load_data`` для тестов агента без Spark.
@@ -89,7 +102,7 @@ def build_fake_spark_data_tools() -> list[BaseTool]:
         """
 
         try:
-            parsed = _parse_sql_like_query(query)
+            parsed = _extract_query_args_with_llm(query=query, query_parser_model=query_parser_model)
         except ValueError as exc:
             return f"Ошибка load_data: {exc}"
 
@@ -119,7 +132,6 @@ def _fake_read_table(
     aggregations: Any,
     order_by: Any,
     max_rows: int | None,
-    include_schema: bool,
 ) -> Any:
     """Выполняет fake-запрос к CSV-таблице и возвращает pandas DataFrame.
 
@@ -132,7 +144,6 @@ def _fake_read_table(
         aggregations: Агрегаты списком объектов.
         order_by: Сортировка списком объектов.
         max_rows: Максимальное число строк результата.
-        include_schema: Нужно ли приложить схему результата.
 
     Returns:
         pandas DataFrame с metadata в ``attrs`` или текст ошибки.
@@ -177,13 +188,6 @@ def _fake_read_table(
         result.attrs["spark_source_file"] = table_alias
         result.attrs["spark_total_rows"] = int(total_rows)
         result.attrs["spark_matched_rows"] = int(matched_rows)
-        if include_schema:
-            result.attrs["spark_schema"] = {
-                "table_name": table_alias,
-                "resolved_table_name": resolved_table_name,
-                "columns_count": len(result.columns),
-                "columns": [{"name": str(name), "type": str(dtype)} for name, dtype in result.dtypes.items()],
-            }
         return result.reset_index(drop=True)
     except ValueError as exc:
         return f"Ошибка load_data: {exc}"
@@ -345,6 +349,11 @@ def _build_filter_mask(*, table: pd.DataFrame, item: Any) -> pd.Series:
         return series.notna()
     if operator == "contains":
         return series.astype("string").str.contains(str(raw_value), case=False, na=False, regex=False)
+    if operator == "contains_any":
+        mask = pd.Series(False, index=series.index)
+        for value in _parse_filter_values(raw_value):
+            mask = mask | series.astype("string").str.contains(str(value), case=False, na=False, regex=False)
+        return mask
     if operator == "in":
         values = [_coerce_filter_value(series, _parse_scalar(value)) for value in _parse_filter_values(raw_value)]
         return series.isin(values)
@@ -382,7 +391,12 @@ def _apply_aggregations(*, table: pd.DataFrame, group_columns: list[str], aggreg
         pandas DataFrame с результатом агрегаций.
     """
 
-    source_columns = [_parse_aggregation_item(item)[1] for item in aggregations]
+    source_columns = [
+        column
+        for item in aggregations
+        for function, column, _alias in [_parse_aggregation_item(item)]
+        if not (function == "count" and column == "*")
+    ]
     missing = _validate_columns(columns=[*group_columns, *source_columns], available_columns=list(table.columns), allow_empty=True)
     if missing:
         raise ValueError(missing)
@@ -392,13 +406,17 @@ def _apply_aggregations(*, table: pd.DataFrame, group_columns: list[str], aggreg
         result = grouped.size().reset_index().iloc[:, : len(group_columns)]
         for item in aggregations:
             function, column, alias = _parse_aggregation_item(item)
-            result[alias or f"{function}_{column}"] = grouped[column].agg(_aggregation_name(function)).to_numpy()
+            result[alias or f"{function}_{column}"] = (
+                grouped.size().to_numpy() if function == "count" and column == "*" else grouped[column].agg(_aggregation_name(function)).to_numpy()
+            )
         return result
 
     payload: dict[str, list[Any]] = {}
     for item in aggregations:
         function, column, alias = _parse_aggregation_item(item)
-        payload[alias or f"{function}_{column}"] = [getattr(table[column], _aggregation_name(function))()]
+        payload[alias or f"{function}_{column}"] = [
+            len(table) if function == "count" and column == "*" else getattr(table[column], _aggregation_name(function))()
+        ]
     return pd.DataFrame(payload)
 
 
@@ -493,15 +511,13 @@ def _parse_filter_item(item: Any) -> tuple[str, str, str]:
         operator = str(_get_field(item, "operator") or "eq").strip().lower()
         values = _get_field(item, "values") or []
         value = _get_field(item, "value")
-        second_value = _get_field(item, "second_value")
         if operator not in _FILTER_OPERATORS:
             raise ValueError(f"Неподдерживаемый оператор фильтра: {operator}")
-        if operator == "in":
+        if operator in {"in", "contains_any"}:
             raw_values = values if values else ([] if value is None else [value])
             raw_value = ",".join(str(part) for part in raw_values)
         elif operator == "between":
-            raw_values = values if values else [part for part in (value, second_value) if part is not None]
-            raw_value = ",".join(str(part) for part in raw_values)
+            raw_value = ",".join(str(part) for part in values)
         else:
             raw_value = "" if value is None else str(value)
         if not column:

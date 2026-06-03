@@ -1,6 +1,7 @@
 ---
 name: cards-event-table
 description: "Краткая карточка источника cards: raw-история карточного канала, POS, e-commerce, ATM, merchant/MCC и связь с hits."
+keywords: "cards, карточные операции, POS, ecommerce, e-commerce, ATM, merchant, MCC, card_number, atm_merchant_name, raw-история"
 ---
 
 # Таблица cards
@@ -61,4 +62,3 @@ description: "Краткая карточка источника cards: raw-ис
 - `/skills/hit-table/joins.md` - маршрут связи `hits` -> `cards` / `uko`.
 
 Читай `fields.md`, если нужно редкое карточное поле, MCC/merchant-разбивка, IP/гео или schema error.
-

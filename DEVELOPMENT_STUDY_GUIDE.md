@@ -39,7 +39,7 @@
 
 1. Создается `SparkSession`.
 2. Загружаются `DeepAgentSettings`.
-3. Создается список tools чтения данных через `build_spark_data_tools(spark)`.
+3. Создается список tools чтения данных через `build_spark_data_tools(spark, query_parser_model=model)`.
 4. Собирается граф через `build_analytics_deep_agent(...)`.
 5. Выполняется `agent.invoke(...)`.
 6. Из результата достается последнее сообщение.

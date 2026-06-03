@@ -5,6 +5,7 @@
 - DerivedColumnSpec: схема одной вычисляемой колонки.
 - AggregationSpec: схема одного агрегата.
 - OrderBySpec: схема одного правила сортировки.
+- ParsedDataQuery: структурированный результат LLM-разбора SQL-подобного запроса.
 - ReadTableInput: схема одного SQL-подобного запроса инструмента ``load_data``.
 """
 
@@ -15,10 +16,25 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 ScalarValue = str | int | float | bool
-FilterOperator = Literal["eq", "ne", "gt", "gte", "lt", "lte", "contains", "in", "between", "is_null", "not_null"]
+FilterOperator = Literal[
+    "eq",
+    "ne",
+    "gt",
+    "gte",
+    "lt",
+    "lte",
+    "contains",
+    "contains_any",
+    "in",
+    "between",
+    "is_null",
+    "not_null",
+]
 DerivedOperation = Literal["year", "month", "year_month", "date", "lower", "upper", "length", "abs"]
 AggregationFunction = Literal["count", "count_distinct", "min", "max", "sum", "mean"]
 SortDirection = Literal["asc", "desc"]
+TableAlias = Literal["hits", "cards", "uko", "history_automarking", "demo_client_timeline"]
+QueryParseStatus = Literal["ready", "needs_more_input", "schema_error"]
 
 
 class FilterCondition(BaseModel):
@@ -29,8 +45,7 @@ class FilterCondition(BaseModel):
         operator: Оператор сравнения или проверки значения.
         value: Одно значение для операторов ``eq``, ``ne``, ``gt``, ``gte``, ``lt``,
             ``lte`` и ``contains``.
-        values: Несколько значений для операторов ``in`` и ``between``.
-        second_value: Вторая граница для оператора ``between``, если первая передана через ``value``.
+        values: Несколько значений для операторов ``in``, ``between`` и ``contains_any``.
 
     Returns:
         Валидированное описание одного фильтра.
@@ -45,13 +60,8 @@ class FilterCondition(BaseModel):
     )
     values: list[ScalarValue] = Field(
         default_factory=list,
-        description="Список значений для операторов in и between. Пример: ['20260101', '20260131'].",
+        description="Список значений для операторов in, between и contains_any. Пример: ['20260101', '20260131'].",
         examples=[["20260101", "20260131"]],
-    )
-    second_value: ScalarValue | None = Field(
-        default=None,
-        description="Вторая граница для between, если первая граница передана в value. Пример: 20260131.",
-        examples=["20260131"],
     )
 
 
@@ -102,6 +112,39 @@ class OrderBySpec(BaseModel):
 
     column: str = Field(description="Колонка для сортировки. Пример: event_dt.", examples=["event_dt"])
     direction: SortDirection = Field(default="asc", description="Направление сортировки. Пример: asc.", examples=["asc"])
+
+
+class ParsedDataQuery(BaseModel):
+    """Структурированный результат LLM-разбора SQL-подобного запроса.
+
+    Args:
+        status: Готовность запроса к выполнению.
+        table_name: Короткое имя таблицы.
+        select_columns: Колонки результата для обычной выборки.
+        filters: Фильтры строк таблицы.
+        derived_columns: Вычисляемые колонки.
+        group_by: Колонки группировки.
+        aggregations: Агрегаты для расчёта.
+        order_by: Правила сортировки.
+        max_rows: Максимальное число строк результата.
+        problem: Описание проблемы, если запрос нельзя выполнить.
+        missing_inputs: Список недостающих обязательных входных данных.
+
+    Returns:
+        Валидированную структуру запроса, которую можно передать во внутреннюю выборку.
+    """
+
+    status: QueryParseStatus = Field(description="Статус разбора: ready, needs_more_input или schema_error.")
+    table_name: str | None = Field(default=None, description="Короткое имя таблицы из query без SQL-alias.")
+    select_columns: list[str] = Field(default_factory=list, description="Колонки результата для обычной выборки.")
+    filters: list[FilterCondition] = Field(default_factory=list, description="Фильтры строк таблицы.")
+    derived_columns: list[DerivedColumnSpec] = Field(default_factory=list, description="Вычисляемые колонки.")
+    group_by: list[str] = Field(default_factory=list, description="Колонки группировки.")
+    aggregations: list[AggregationSpec] = Field(default_factory=list, description="Агрегаты для расчёта.")
+    order_by: list[OrderBySpec] = Field(default_factory=list, description="Правила сортировки результата.")
+    max_rows: int | None = Field(default=None, ge=0, description="Максимальное число строк результата.")
+    problem: str = Field(default="", description="Описание проблемы, если status не ready.")
+    missing_inputs: list[str] = Field(default_factory=list, description="Недостающие обязательные входные данные.")
 
 
 class ReadTableInput(BaseModel):
@@ -156,7 +199,10 @@ __all__ = [
     "FilterCondition",
     "FilterOperator",
     "OrderBySpec",
+    "ParsedDataQuery",
+    "QueryParseStatus",
     "ReadTableInput",
     "ScalarValue",
     "SortDirection",
+    "TableAlias",
 ]

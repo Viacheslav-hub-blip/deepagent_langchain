@@ -246,11 +246,8 @@ def _build_predicate(filter_item: Any) -> str:
     operator = _get(filter_item, "operator") or "eq"
     value = _get(filter_item, "value")
     values = _as_list(_get(filter_item, "values"))
-    second_value = _get(filter_item, "second_value")
     if operator == "in" and not values and value is not None:
         values = [value]
-    if operator == "between" and not values:
-        values = [item for item in (value, second_value) if item is not None]
 
     if operator == "is_null":
         return f"{column} IS NULL"

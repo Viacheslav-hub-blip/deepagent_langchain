@@ -40,14 +40,19 @@ class SelectedSkillPaths(BaseModel):
 
     Attributes:
         paths: Виртуальные пути выбранных файлов ``SKILL.md`` одной строкой через запятую.
+        selection_reason: Краткое объяснение выбора skills.
     """
 
     paths: str = Field(
         default="",
         description=(
             "Виртуальные пути выбранных skill-файлов одной строкой через запятую. "
-            "Для многошаговых задач включай все потенциально нужные skills."
+            "Выбирай минимально полезный набор skills."
         ),
+    )
+    selection_reason: str = Field(
+        default="",
+        description="Кратко объясни, почему выбран именно этот минимально полезный набор skills.",
     )
 
 
@@ -278,9 +283,8 @@ def select_relevant_skill_paths_with_llm(
                     content=(
                         "Ты выбираешь domain skills для предварительной загрузки по запросу "
                         "пользователя. Используй только пути из переданного index. "
-                        "Для многошаговых запросов выбирай все skills, которые могут понадобиться "
-                        "на разных этапах, а не только один наиболее похожий. "
-                        "Лучше включить лишний релевантный skill, чем пропустить нужный downstream-источник."
+                        "Выбирай минимально полезный набор skills для выполнения запроса. "
+                        "В selection_reason кратко объясни, почему выбран именно этот набор."
                     )
                 ),
                 HumanMessage(
@@ -329,6 +333,7 @@ def build_skills_index(
                 "path": _virtual_skill_path(skills_root, skill_path, skills_virtual_dir),
                 "name": parsed.get("name") or skill_path.parent.name,
                 "description": parsed.get("description") or "",
+                "keywords": parsed.get("keywords") or "",
             }
         )
     return index
@@ -410,7 +415,7 @@ def _parse_skill_index_entry(content: str) -> dict[str, str]:
         content: Текст ``SKILL.md``.
 
     Returns:
-        Словарь с ключами ``name`` и ``description`` при наличии данных.
+        Словарь с ключами ``name``, ``description`` и ``keywords`` при наличии данных.
     """
 
     result: dict[str, str] = {}
@@ -419,6 +424,8 @@ def _parse_skill_index_entry(content: str) -> dict[str, str]:
             result["name"] = line.split(":", 1)[1].strip().strip('"')
         if line.startswith("description:"):
             result["description"] = line.split(":", 1)[1].strip().strip('"')
+        elif line.startswith("keywords:"):
+            result["keywords"] = line.split(":", 1)[1].strip().strip('"')
     return result
 
 

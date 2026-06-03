@@ -4,14 +4,16 @@
 дать агенту доменные инструкции, безопасные инструменты чтения данных, контроль больших
 ответов инструментов и понятную точку запуска в других проектах.
 
-Запуск проекта рассчитан на один файл:
+Локальный тестовый запуск проекта рассчитан на один файл:
 
 ```bash
 python run.py
 ```
 
-В `run.py` нет параметров командной строки. В нем создается Spark session, собирается
-инструмент `load_data`, собирается агент и выполняется один `invoke`.
+В `run.py` нет параметров командной строки. В нем собирается fake-инструмент `load_data`
+поверх CSV из папки `data`, собирается агент и выполняется один `stream_events`.
+Production-инструмент поверх Spark использует тот же `query`-интерфейс и то же описание
+tool, но создается через `build_spark_data_tools`.
 
 ## Что добавлено к базовому DeepAgent
 
@@ -40,11 +42,15 @@ python run.py
    что ответ действительно основан на результатах инструментов и что заявленные файлы
    существуют. Флаг включения находится в конфиге: `enable_retrieval_critic`.
 
-4. Инструмент чтения Spark-таблиц.
+4. Инструменты чтения данных.
 
-   `build_spark_data_tools(spark)` создает tool `load_data`. Tool принимает один
-   аргумент `query`: SQL-подобный запрос с alias таблицы, обязательным периодом,
-   явными колонками результата, фильтрами, агрегациями и сортировкой.
+   `build_spark_data_tools(spark, query_parser_model=model)` создает настоящий
+   `load_data` поверх Spark session. `build_fake_spark_data_tools(query_parser_model=model)`
+   создает fake `load_data` поверх локальных CSV. Оба инструмента имеют одинаковые
+   `name`, `description` и `args_schema`: один аргумент `query` с SQL-подобным запросом,
+   alias таблицы, обязательным периодом, явными колонками результата, фильтрами,
+   агрегациями и сортировкой. Разбор `query` выполняется LLM-нормализатором, а не
+   regex-парсером.
 
 5. Прозрачный ответ `load_data`.
 
@@ -91,6 +97,8 @@ deep_agent_test/
 
   tools/
     spark_data.py             # load_data поверх Spark session
+    fake_spark_data.py        # load_data поверх локальных CSV для тестов без Spark
+    data_query_schema.py      # pydantic-схемы query и LLM-разбора
     data_tools_wrapper.py     # прозрачное описание запросов к data-tools
     execute_python_code.py    # безопасное выполнение Python-кода
     load_skills.py            # ручная дозагрузка skills
@@ -106,22 +114,20 @@ deep_agent_test/
 Целевой запуск идет через `python run.py`. Trace-логгер подключается как LangChain
 callback и пишет подробный txt-файл по каждому запросу к LLM.
 
-## Минимальный запуск
+## Минимальный fake-запуск
 
-Файл `run.py` находится в корне проекта. В нем должен быть только код запуска:
+Файл `run.py` находится в корне проекта и по умолчанию использует fake-данные:
 
 ```python
-from pyspark.sql import SparkSession
-
-from deep_agent_test import build_analytics_deep_agent, build_spark_data_tools, load_deep_agent_settings
+from deep_agent_test import build_analytics_deep_agent, load_deep_agent_settings
 from deep_agent_test.core.trace_logging import FileTraceCallbackHandler, build_trace_file_path
+from deep_agent_test.tools.fake_spark_data import build_fake_spark_data_tools
 from model import model
 
 USER_MESSAGE = "текст запроса пользователя"
 
-spark = SparkSession.builder.appName("analytics-deep-agent").getOrCreate()
 settings = load_deep_agent_settings()
-data_tools = build_spark_data_tools(spark)
+data_tools = build_fake_spark_data_tools(query_parser_model=model)
 agent = build_analytics_deep_agent(model=model, settings=settings, data_tools=data_tools)
 trace_file_path = build_trace_file_path(settings.trace_log_dir)
 trace_handler = FileTraceCallbackHandler(trace_file_path)
@@ -136,8 +142,19 @@ result = agent.invoke(
 print(f"Trace log: {trace_file_path}")
 ```
 
-В репозитории уже есть готовый `run.py` с таким сценарием. Чтобы задать другой запрос,
-измените константу `USER_MESSAGE`.
+Чтобы проверить настоящий Spark-инструмент, замените только сборку data-tools:
+
+```python
+from pyspark.sql import SparkSession
+
+from deep_agent_test import build_spark_data_tools
+
+spark = SparkSession.builder.appName("analytics-deep-agent").getOrCreate()
+data_tools = build_spark_data_tools(spark, query_parser_model=model)
+```
+
+Остальная сборка агента не меняется. Чтобы задать другой запрос, измените константу
+`USER_MESSAGE`.
 
 ## Конфигурация
 
@@ -201,7 +218,7 @@ ORDER BY event_dt ASC, event_dttm_readable ASC
 query:
 LOAD cards
 PERIOD event_dt FROM '20260101' TO '20260131'
-SELECT event_description, count(event_id) AS events_count, sum(transaction_amount_in_rub) AS amount_rub
+SELECT event_description, COUNT(*) AS events_count, sum(transaction_amount_in_rub) AS amount_rub
 GROUP BY event_description
 ORDER BY events_count DESC
 ```
@@ -221,7 +238,7 @@ GROUP BY event_month
 Поддерживаемые операторы фильтра:
 
 ```text
-=, !=, <>, >, >=, <, <=, CONTAINS, IN (...), BETWEEN
+=, !=, <>, >, >=, <, <=, LIKE, CONTAINS, IN (...), BETWEEN, AND, OR
 ```
 
 Поддерживаемые операции для `DERIVE`:
@@ -233,7 +250,7 @@ year, month, year_month, date, lower, upper, length, abs
 Поддерживаемые агрегаты:
 
 ```text
-count, count_distinct, min, max, sum, mean
+count, count_distinct, min, max, sum, mean. `COUNT(*)` разрешён.
 ```
 
 ## Skills

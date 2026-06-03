@@ -3,7 +3,7 @@
 Содержит:
 - ReadTableInput: структурированная схема аргументов инструмента ``load_data``.
 - build_spark_data_tools: сборка LangChain tool поверх готовой Spark session.
-- _parse_sql_like_query: разбор SQL-подобного запроса в аргументы выборки.
+- _extract_query_args_with_llm: LLM-разбор SQL-подобного запроса в аргументы выборки.
 - _read_table: выполнение выборки через Spark DataFrame API.
 - _resolve_table_name: преобразование короткого alias таблицы в полное Spark-имя.
 - _available_table_aliases_text: форматирование списка доступных alias таблиц.
@@ -29,20 +29,22 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
 from langchain_core.tools import BaseTool, StructuredTool
 
-from deep_agent_test.tools.data_query_schema import ReadTableInput
+from deep_agent_test.tools.data_query_schema import ParsedDataQuery, ReadTableInput
 
 READ_TABLE_DESCRIPTION = (
     "load_data\n"
     "---\n"
     "Описание: универсальная выборка из Spark-таблиц. "
     "Инструмент принимает один параметр query: SQL-подобный текст запроса. "
-    "Агент сам пишет запрос по известным ему skills, а инструмент разбирает query, "
-    "проверяет обязательный период и выполняет выборку. При успешной выборке возвращает pandas DataFrame.\n"
+    "Агент сам пишет запрос по известным ему skills, внутренний LLM нормализует query "
+    "в структурированные аргументы, затем инструмент проверяет обязательный период и выполняет выборку. "
+    "При успешной выборке возвращает pandas DataFrame.\n"
     "Выгрузка всех столбцов запрещена: SELECT * и SELECT all не выполняются. "
     "Период выборки обязателен для каждого запроса.\n\n"
     "Параметры:\n"
@@ -50,18 +52,32 @@ READ_TABLE_DESCRIPTION = (
     "Формат:\n"
     "  LOAD <table_alias>\n"
     "  PERIOD <date_column> FROM '<YYYYMMDD>' TO '<YYYYMMDD>'\n"
-    "  SELECT <column_1>, <column_2> [, count(<column>) AS <alias>]\n"
-    "  WHERE <column> = '<value>' AND <column> CONTAINS '<value>'\n"
+    "  SELECT <column_1>, <column_2> [, COUNT(*) AS <alias>] [, count(<column>) AS <alias>]\n"
+    "  WHERE <column> = '<value>' AND (<column> LIKE '%value%' OR <column> CONTAINS '<value>')\n"
     "  GROUP BY <column>\n"
     "  ORDER BY <column> ASC|DESC\n"
     "  LIMIT <int>\n\n"
     "Допустимые alias: hits, cards, uko, history_automarking, demo_client_timeline. "
     "Вместо LOAD можно использовать обычный FROM, но alias должен быть коротким. "
     "Период задавай только через PERIOD или через WHERE <date_column> BETWEEN '<from>' AND '<to>'. "
-    "SELECT * и SELECT all запрещены. Фильтры WHERE поддерживают =, !=, >, >=, <, <=, CONTAINS, IN, BETWEEN."
+    "SELECT * и SELECT all запрещены для обычной выборки, но COUNT(*) разрешён. "
+    "Фильтры WHERE поддерживают =, !=, >, >=, <, <=, LIKE, CONTAINS, IN, BETWEEN, AND и OR."
 )
 
-_FILTER_OPERATORS = {"eq", "ne", "gt", "gte", "lt", "lte", "contains", "in", "between", "is_null", "not_null"}
+_FILTER_OPERATORS = {
+    "eq",
+    "ne",
+    "gt",
+    "gte",
+    "lt",
+    "lte",
+    "contains",
+    "contains_any",
+    "in",
+    "between",
+    "is_null",
+    "not_null",
+}
 _DERIVED_OPERATIONS = {"year", "month", "year_month", "date", "lower", "upper", "length", "abs"}
 _AGGREGATION_FUNCTIONS = {"count", "count_distinct", "min", "max", "sum", "mean"}
 TABLE_ALIASES: dict[str, str] = {
@@ -73,11 +89,12 @@ TABLE_ALIASES: dict[str, str] = {
 }
 
 
-def build_spark_data_tools(spark: Any) -> list[BaseTool]:
+def build_spark_data_tools(spark: Any, query_parser_model: Any | None = None) -> list[BaseTool]:
     """Создает инструмент ``load_data`` поверх готовой Spark session.
 
     Args:
         spark: Активная ``pyspark.sql.SparkSession``, созданная один раз при старте приложения.
+        query_parser_model: Chat-модель LangChain для внутреннего разбора SQL-подобного ``query``.
 
     Returns:
         Список с одним LangChain tool ``load_data``.
@@ -94,7 +111,7 @@ def build_spark_data_tools(spark: Any) -> list[BaseTool]:
         """
 
         try:
-            parsed = _parse_sql_like_query(query)
+            parsed = _extract_query_args_with_llm(query=query, query_parser_model=query_parser_model)
         except ValueError as exc:
             return f"Ошибка load_data: {exc}"
 
@@ -117,369 +134,506 @@ def build_spark_data_tools(spark: Any) -> list[BaseTool]:
     ]
 
 
-def _parse_sql_like_query(query: str) -> dict[str, Any]:
-    """Разбирает SQL-подобный запрос ``load_data`` в старые структурированные аргументы.
+def _extract_query_args_with_llm(*, query: str, query_parser_model: Any | None) -> dict[str, Any]:
+    """Извлекает аргументы выборки из SQL-подобного запроса с помощью LLM.
 
     Args:
-        query: SQL-подобный текст с ``LOAD`` или ``FROM``, ``PERIOD`` и ``SELECT``.
+        query: SQL-подобный запрос, который написал data-retrieval-agent.
+        query_parser_model: Chat-модель LangChain для JSON-разбора ``query``.
 
     Returns:
         Словарь аргументов, совместимый с внутренней функцией ``_read_table``.
 
     Raises:
-        ValueError: Запрос не содержит обязательных частей или использует неподдерживаемый синтаксис.
+        ValueError: Модель разбора не передана или LLM вернул неполную структуру запроса.
     """
 
-    text = query.strip().rstrip(";")
-    if not text:
-        raise ValueError("query пустой. Передай SQL-подобный запрос с LOAD, PERIOD и SELECT.")
-
-    table_name = _extract_table_alias(text)
-    select_text = _extract_clause(text, "SELECT", ["FROM", "WHERE", "PERIOD", "GROUP BY", "ORDER BY", "LIMIT"])
-    if not select_text:
-        raise ValueError("в query нет SELECT. Укажи явные колонки результата или агрегаты.")
-
-    group_by = _parse_columns(_extract_clause(text, "GROUP BY", ["ORDER BY", "LIMIT"]))
-    order_by = _parse_order_by_clause(_extract_clause(text, "ORDER BY", ["LIMIT"]))
-    max_rows = _parse_limit(_extract_clause(text, "LIMIT", []))
-    derived_columns = _parse_derive_clause(_extract_clause(text, "DERIVE", ["SELECT", "WHERE", "GROUP BY", "ORDER BY", "LIMIT"]))
-    select_columns, aggregations = _parse_select_clause(select_text=select_text, group_by=group_by)
-
-    filters = _parse_where_clause(_extract_clause(text, "WHERE", ["GROUP BY", "ORDER BY", "LIMIT"]))
-    period_filter = _parse_period_clause(text)
-    if period_filter is None:
-        period_filter = _find_between_filter(filters)
-    if period_filter is None:
+    if query_parser_model is None:
         raise ValueError(
-            "в query нет обязательного периода. Добавь строку вида "
-            "PERIOD event_dt FROM '20260101' TO '20260131'."
+            "для load_data не передана query_parser_model. "
+            "Собери data tool с query_parser_model=model."
         )
-    if period_filter not in filters:
-        filters.insert(0, period_filter)
 
+    messages = [
+        ("system", _QUERY_PARSER_SYSTEM_PROMPT),
+        ("human", _normalize_query_text_for_parser(query)),
+    ]
+    parsed = _invoke_query_parser_json_fallback(query_parser_model=query_parser_model, messages=messages)
+    try:
+        return _parsed_query_to_read_args(parsed)
+    except ValueError as first_error:
+        repaired = _repair_parsed_query_with_llm(
+            query_parser_model=query_parser_model,
+            query=query,
+            parsed=parsed,
+            validation_error=str(first_error),
+        )
+        if repaired is not None:
+            try:
+                return _parsed_query_to_read_args(repaired)
+            except ValueError as repaired_error:
+                raise ValueError(
+                    f"{repaired_error}\nLLM parser output: {_format_parsed_query_debug(repaired)}"
+                ) from repaired_error
+        raise ValueError(f"{first_error}\nLLM parser output: {_format_parsed_query_debug(parsed)}") from first_error
+
+
+_QUERY_PARSER_SYSTEM_PROMPT = """
+Ты внутренний нормализатор запроса для инструмента load_data.
+На входе только SQL-подобный query. Не выполняй анализ данных и не отвечай текстом.
+Верни ParsedDataQuery.
+
+Правила извлечения:
+- status="ready" только если есть короткое имя таблицы, явные колонки/агрегации и временной интервал.
+- table_name — только короткое имя источника: hits, cards, uko, history_automarking, demo_client_timeline.
+- Если первая строка содержит один из известных alias рядом со служебным словом или опечаткой,
+  извлекай известный alias и игнорируй лишний токен.
+- Не требуй SQL-alias. `LOAD hits`, `LOAD hits AS h`, `FROM hits h` и `FROM <hits> AS t`
+  означают table_name="hits".
+- Игнорируй SQL-alias и служебные префиксы: `h.event_dt`, `t.event_dt`, `<hits>.event_dt`
+  должны стать `event_dt`.
+- Если нет периода начала/конца, верни status="needs_more_input" и missing_inputs.
+- Если указана неизвестная таблица, неизвестный синтаксис или неподдерживаемая агрегация,
+  верни status="schema_error" и problem.
+- SELECT * как выборка колонок запрещён. Для COUNT(*) используй aggregation:
+  {"function": "count", "column": "*", "alias": "..."}.
+- Если в query есть SELECT col1, col2, эти имена обязательно должны попасть в select_columns.
+- Не возвращай needs_more_input из-за отсутствия колонок, если после SELECT указаны колонки или агрегаты.
+- LIKE '%x%' преобразуй в operator="contains", value="x".
+- Цепочку OR по одной колонке вида col LIKE '%a%' OR col LIKE '%b%' преобразуй в один
+  фильтр operator="contains_any", values=["a", "b"].
+- IN (...) преобразуй в operator="in".
+- BETWEEN преобразуй в operator="between", values=[start, end].
+- Сохраняй строковые идентификаторы строками.
+- Не выдумывай поля, которых нет в query. Если данных недостаточно, верни needs_more_input.
+
+Примеры:
+
+query:
+LOAD hits
+PERIOD event_dt FROM '20260101' TO '20260131'
+SELECT event_id, event_dt, event_description
+
+JSON:
+{
+  "status": "ready",
+  "table_name": "hits",
+  "select_columns": ["event_id", "event_dt", "event_description"],
+  "filters": [
+    {"column": "event_dt", "operator": "between", "values": ["20260101", "20260131"]}
+  ],
+  "derived_columns": [],
+  "group_by": [],
+  "aggregations": [],
+  "order_by": [],
+  "max_rows": null,
+  "problem": "",
+  "missing_inputs": []
+}
+
+query:
+LOAD hits
+PERIOD event_dt FROM '20260101' TO '20260131'
+SELECT event_description, COUNT(*) AS events_count
+WHERE event_description LIKE '%обучение%' OR event_description LIKE '%курсы%'
+GROUP BY event_description
+ORDER BY events_count DESC
+
+JSON:
+{
+  "status": "ready",
+  "table_name": "hits",
+  "select_columns": ["event_description"],
+  "filters": [
+    {"column": "event_dt", "operator": "between", "values": ["20260101", "20260131"]},
+    {"column": "event_description", "operator": "contains_any", "values": ["обучение", "курсы"]}
+  ],
+  "derived_columns": [],
+  "group_by": ["event_description"],
+  "aggregations": [
+    {"function": "count", "column": "*", "alias": "events_count"}
+  ],
+  "order_by": [
+    {"column": "events_count", "direction": "desc"}
+  ],
+  "max_rows": null,
+  "problem": "",
+  "missing_inputs": []
+}
+
+query:
+LOAD cards AS c
+PERIOD c.event_dt FROM '20260101' TO '20260107'
+SELECT c.event_id, c.event_dt, c.atm_mcc
+WHERE c.atm_mcc IN ('8299', '8244')
+LIMIT 50
+
+JSON:
+{
+  "status": "ready",
+  "table_name": "cards",
+  "select_columns": ["event_id", "event_dt", "atm_mcc"],
+  "filters": [
+    {"column": "event_dt", "operator": "between", "values": ["20260101", "20260107"]},
+    {"column": "atm_mcc", "operator": "in", "values": ["8299", "8244"]}
+  ],
+  "derived_columns": [],
+  "group_by": [],
+  "aggregations": [],
+  "order_by": [],
+  "max_rows": 50,
+  "problem": "",
+  "missing_inputs": []
+}
+""".strip()
+
+
+def _invoke_query_parser_json_fallback(*, query_parser_model: Any, messages: list[tuple[str, str]]) -> ParsedDataQuery:
+    """Вызывает модель без structured-output и разбирает JSON из текстового ответа.
+
+    Args:
+        query_parser_model: Chat-модель LangChain.
+        messages: Сообщения system/human для внутреннего нормализатора.
+
+    Returns:
+        Pydantic-модель ``ParsedDataQuery``.
+
+    Raises:
+        ValueError: Модель не вернула JSON, совместимый с ``ParsedDataQuery``.
+    """
+
+    fallback_messages = [
+        messages[0],
+        (
+            "human",
+            f"{messages[1][1]}\n\nВерни только JSON-объект без Markdown и пояснений.",
+        ),
+    ]
+    raw = query_parser_model.invoke(fallback_messages)
+    try:
+        return ParsedDataQuery.model_validate(_extract_json_object(_message_text(raw)))
+    except Exception as exc:
+        raise ValueError(f"LLM parser не вернул валидный ParsedDataQuery JSON: {exc}") from exc
+
+
+def _repair_parsed_query_with_llm(
+    *,
+    query_parser_model: Any,
+    query: str,
+    parsed: ParsedDataQuery,
+    validation_error: str,
+) -> ParsedDataQuery | None:
+    """Повторно просит LLM исправить результат разбора, если первый JSON не прошёл валидацию.
+
+    Args:
+        query_parser_model: Chat-модель LangChain для внутреннего разбора запроса.
+        query: Исходный SQL-подобный запрос, который передал агент.
+        parsed: Первый структурированный результат разбора.
+        validation_error: Ошибка обязательной валидации первого результата.
+
+    Returns:
+        Исправленная модель ``ParsedDataQuery`` или ``None``, если repair-вызов не дал валидный JSON.
+    """
+
+    parsed_json = json.dumps(parsed.model_dump(mode="json"), ensure_ascii=False)
+    repair_prompt = (
+        "Исправь только структурированный JSON-разбор query для load_data.\n"
+        "Не анализируй данные и не добавляй поля, которых нет в query.\n"
+        "Если в query есть SELECT col1, col2, скопируй эти имена в select_columns.\n"
+        "Если в query есть COUNT(*) или count(col), перенеси это в aggregations.\n"
+        "Если в query есть PERIOD date_col FROM 'start' TO 'end', добавь фильтр between по date_col.\n"
+        "Если первая строка содержит известный alias таблицы рядом с лишним словом или опечаткой, используй alias.\n"
+        "Игнорируй посторонние SQL-символы и alias: <table>, AS t, t.column должны стать table и column.\n\n"
+        f"Validation error:\n{validation_error}\n\n"
+        f"Original query:\n{_normalize_query_text_for_parser(query)}\n\n"
+        f"Current ParsedDataQuery JSON:\n{parsed_json}"
+    )
+    try:
+        return _invoke_query_parser_json_fallback(
+            query_parser_model=query_parser_model,
+            messages=[("system", _QUERY_PARSER_SYSTEM_PROMPT), ("human", repair_prompt)],
+        )
+    except ValueError:
+        return None
+
+
+def _format_parsed_query_debug(parsed: ParsedDataQuery) -> str:
+    """Формирует короткий JSON-дамп результата LLM-разбора для диагностики ошибок инструмента.
+
+    Args:
+        parsed: Структурированный результат LLM-разбора.
+
+    Returns:
+        JSON-строка с ключевыми полями ``ParsedDataQuery``.
+    """
+
+    return json.dumps(parsed.model_dump(mode="json"), ensure_ascii=False)
+
+
+def _message_text(message: Any) -> str:
+    """Извлекает текст из ответа chat-модели.
+
+    Args:
+        message: Ответ LangChain chat model или строка.
+
+    Returns:
+        Текстовое содержимое ответа.
+    """
+
+    content = getattr(message, "content", message)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text") or item.get("content") or ""))
+            else:
+                parts.append(str(item))
+        return "\n".join(part for part in parts if part)
+    return str(content)
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    """Извлекает первый JSON-объект из текста модели.
+
+    Args:
+        text: Текстовый ответ LLM.
+
+    Returns:
+        Распарсенный JSON-объект.
+
+    Raises:
+        ValueError: В тексте нет JSON-объекта.
+    """
+
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.I).strip()
+        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError("в ответе модели нет JSON-объекта.")
+    return json.loads(cleaned[start : end + 1])
+
+
+def _normalize_query_text_for_parser(query: str) -> str:
+    """Убирает из SQL-подобного запроса шум, который не должен влиять на LLM-разбор.
+
+    Args:
+        query: Исходный SQL-подобный запрос.
+
+    Returns:
+        Запрос без угловых скобок вокруг таблиц и без SQL-alias после ``LOAD``/``FROM``.
+    """
+
+    text = query.strip()
+    text = re.sub(r"<([A-Za-z_][\w]*)>", r"\1", text)
+    text = re.sub(r"(?im)^(\s*LOAD\s+)([A-Za-z_][\w]*)(?:\s+AS)?\s+[A-Za-z_][\w]*(\s*)$", r"\1\2\3", text)
+    text = re.sub(
+        r"(?is)\bFROM\s+([A-Za-z_][\w]*)(?:\s+AS)?\s+[A-Za-z_][\w]*\b",
+        r"FROM \1",
+        text,
+    )
+    return text
+
+
+def _parsed_query_to_read_args(parsed: ParsedDataQuery) -> dict[str, Any]:
+    """Преобразует результат LLM-разбора в аргументы внутренней выборки.
+
+    Args:
+        parsed: Структурированный результат LLM-разбора запроса.
+
+    Returns:
+        Словарь аргументов для ``_read_table``.
+
+    Raises:
+        ValueError: LLM сообщил проблему или вернул неполный запрос.
+    """
+
+    if parsed.status != "ready":
+        details = parsed.problem or ", ".join(parsed.missing_inputs) or "query нельзя выполнить."
+        raise ValueError(f"{parsed.status}: {details}")
+    _validate_parsed_query(parsed)
+    table_name = _normalize_table_alias(parsed.table_name)
+    filters = [_normalize_filter_item(_dump_model(item)) for item in parsed.filters]
+    derived_columns = [_normalize_derived_item(_dump_model(item)) for item in parsed.derived_columns]
+    aggregations = [_normalize_aggregation_item(_dump_model(item)) for item in parsed.aggregations]
+    order_by = [_normalize_order_item(_dump_model(item)) for item in parsed.order_by]
     return {
         "table_name": table_name,
-        "select_columns": select_columns,
+        "select_columns": [_normalize_column_name(column) for column in parsed.select_columns if str(column).strip()],
         "filters": filters,
         "derived_columns": derived_columns,
-        "group_by": group_by,
+        "group_by": [_normalize_column_name(column) for column in parsed.group_by if str(column).strip()],
         "aggregations": aggregations,
         "order_by": order_by,
-        "max_rows": max_rows,
-        "include_schema": False,
+        "max_rows": parsed.max_rows,
     }
 
 
-def _extract_table_alias(text: str) -> str:
-    """Извлекает короткий alias таблицы из ``LOAD`` или ``FROM``.
+def _validate_parsed_query(parsed: ParsedDataQuery) -> None:
+    """Проверяет обязательные части запроса после LLM-разбора.
 
     Args:
-        text: Полный SQL-подобный запрос.
+        parsed: Структурированный результат LLM-разбора запроса.
 
     Returns:
-        Короткий alias таблицы.
+        ``None``, если запрос можно выполнять.
 
     Raises:
-        ValueError: Alias таблицы не найден.
+        ValueError: В запросе нет обязательных колонок, периода или таблицы.
     """
 
-    match = re.search(r"(?im)^\s*LOAD\s+([A-Za-z_][\w]*)\b", text)
-    if match is None:
-        match = re.search(r"(?is)\bFROM\s+([A-Za-z_][\w]*)\b", text)
-    if match is None:
-        raise ValueError("в query нет LOAD <table_alias> или FROM <table_alias>.")
-    return match.group(1).strip()
+    table_name = _normalize_table_alias(parsed.table_name)
+    if not table_name:
+        raise ValueError("needs_more_input: в query не указан alias таблицы.")
+    if table_name not in TABLE_ALIASES:
+        raise ValueError(
+            f"schema_error: неизвестная таблица {parsed.table_name!r}. Доступные таблицы: {_available_table_aliases_text()}."
+        )
+    select_columns = [str(column).strip() for column in parsed.select_columns if str(column).strip()]
+    if {column.lower() for column in select_columns} & {"*", "all"}:
+        raise ValueError("schema_error: SELECT * и SELECT all запрещены для обычной выборки.")
+    if not select_columns and not parsed.aggregations:
+        raise ValueError("needs_more_input: в query нет явных колонок результата или агрегаций.")
+    if not _has_required_period(parsed.filters):
+        raise ValueError("needs_more_input: в query нет обязательного временного интервала с двумя границами.")
 
 
-def _extract_clause(text: str, clause: str, stop_clauses: list[str]) -> str:
-    """Извлекает тело одной SQL-подобной секции.
+def _normalize_table_alias(value: Any) -> str:
+    """Очищает имя таблицы от SQL-alias и служебных символов.
 
     Args:
-        text: Полный SQL-подобный запрос.
-        clause: Имя секции, которую нужно найти.
-        stop_clauses: Секции, на которых нужно остановить чтение.
+        value: Значение ``table_name``, которое вернул LLM.
 
     Returns:
-        Текст секции без имени или пустая строка, если секция отсутствует.
+        Короткий alias таблицы или пустую строку.
     """
 
-    stop_pattern = "|".join(re.escape(stop) for stop in stop_clauses)
-    pattern = rf"(?is)\b{re.escape(clause)}\b\s+(.+?)(?=\b(?:{stop_pattern})\b|\Z)" if stop_pattern else rf"(?is)\b{re.escape(clause)}\b\s+(.+?)\Z"
-    match = re.search(pattern, text)
-    return match.group(1).strip().rstrip(";") if match else ""
+    text = str(value or "").strip().strip("`\"'").strip()
+    text = re.sub(r"[<>]", "", text)
+    text = re.sub(r"(?i)^\s*(LOAD|FROM)\s+", "", text).strip()
+    text = re.split(r"(?i)\s+AS\s+|\s+", text, maxsplit=1)[0]
+    if "." in text:
+        text = text.split(".")[-1]
+    return text.strip()
 
 
-def _parse_period_clause(text: str) -> dict[str, Any] | None:
-    """Разбирает обязательную секцию периода.
+def _normalize_column_name(value: Any) -> str:
+    """Очищает имя колонки от SQL-alias, кавычек и угловых скобок.
 
     Args:
-        text: Полный SQL-подобный запрос.
+        value: Имя колонки, которое вернул LLM.
 
     Returns:
-        Фильтр ``between`` по дате или ``None``, если секция отсутствует.
+        Имя колонки без префикса таблицы или SQL-alias.
     """
 
-    match = re.search(
-        r"(?is)\bPERIOD\s+([A-Za-z_][\w]*)\s+FROM\s+(['\"]?)([^'\"\s]+)\2\s+TO\s+(['\"]?)([^'\"\s]+)\4",
-        text,
-    )
-    if match is None:
-        return None
-    return {"column": match.group(1), "operator": "between", "values": [match.group(3), match.group(5)]}
+    text = str(value or "").strip().strip("`\"'").strip()
+    text = re.sub(r"[<>]", "", text)
+    if "." in text:
+        text = text.split(".")[-1]
+    return text.strip()
 
 
-def _parse_select_clause(*, select_text: str, group_by: list[str]) -> tuple[list[str], list[dict[str, str]]]:
-    """Разбирает ``SELECT`` на обычные колонки и агрегаты.
+def _normalize_filter_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Очищает колонку фильтра от SQL-префиксов.
 
     Args:
-        select_text: Текст после ``SELECT``.
-        group_by: Колонки группировки, которые не нужно дублировать в ``select_columns`` при агрегации.
+        item: Фильтр, который вернул LLM.
 
     Returns:
-        Кортеж ``(select_columns, aggregations)``.
-
-    Raises:
-        ValueError: ``SELECT`` пустой или запрашивает все поля.
+        Фильтр с нормализованным именем колонки.
     """
 
-    items = _split_csv(select_text)
-    if not items:
-        raise ValueError("SELECT пустой. Укажи конкретные поля результата.")
-    forbidden = {item.strip().lower() for item in items} & {"*", "all"}
-    if forbidden:
-        raise ValueError("SELECT * и SELECT all запрещены. Укажи минимальный список конкретных колонок.")
-
-    select_columns: list[str] = []
-    aggregations: list[dict[str, str]] = []
-    for item in items:
-        aggregation = _parse_aggregation_expression(item)
-        if aggregation:
-            aggregations.append(aggregation)
-        elif item not in group_by:
-            select_columns.append(item)
-    return ([] if aggregations else select_columns), aggregations
+    result = dict(item)
+    result["column"] = _normalize_column_name(result.get("column"))
+    return result
 
 
-def _parse_aggregation_expression(item: str) -> dict[str, str] | None:
-    """Разбирает один агрегат из ``SELECT``.
+def _normalize_derived_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Очищает вычисляемую колонку от SQL-префиксов.
 
     Args:
-        item: Элемент списка ``SELECT``.
+        item: Описание вычисляемой колонки.
 
     Returns:
-        Описание агрегата или ``None``, если элемент является обычной колонкой.
+        Описание с нормализованными именами колонок.
     """
 
-    match = re.fullmatch(
-        r"\s*(count|count_distinct|min|max|sum|mean)\s*\(\s*([A-Za-z_][\w]*)\s*\)(?:\s+AS\s+([A-Za-z_][\w]*))?\s*",
-        item,
-        flags=re.I,
-    )
-    if match is None:
-        return None
-    function, column, alias = match.groups()
-    return {"function": function.lower(), "column": column, "alias": alias or ""}
+    result = dict(item)
+    result["name"] = _normalize_column_name(result.get("name"))
+    result["source_column"] = _normalize_column_name(result.get("source_column"))
+    return result
 
 
-def _parse_where_clause(where_text: str) -> list[dict[str, Any]]:
-    """Разбирает ``WHERE`` в список структурированных фильтров.
+def _normalize_aggregation_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Очищает агрегат от SQL-префиксов.
 
     Args:
-        where_text: Текст после ``WHERE``.
+        item: Описание агрегата.
 
     Returns:
-        Список фильтров для внутренней выборки.
+        Описание агрегата с нормализованной колонкой.
     """
 
-    return [_parse_where_condition(condition) for condition in _split_where_conditions(where_text)]
+    result = dict(item)
+    column = str(result.get("column") or "").strip()
+    result["column"] = "*" if column == "*" else _normalize_column_name(column)
+    return result
 
 
-def _split_where_conditions(where_text: str) -> list[str]:
-    """Разделяет условия ``WHERE`` по ``AND`` без разрыва оператора ``BETWEEN``.
+def _normalize_order_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Очищает сортировку от SQL-префиксов.
 
     Args:
-        where_text: Текст после ``WHERE``.
+        item: Описание сортировки.
 
     Returns:
-        Список отдельных условий.
+        Описание сортировки с нормализованной колонкой.
     """
 
-    if not where_text:
-        return []
-
-    def protect_between(match: re.Match[str]) -> str:
-        """Заменяет внутренний ``AND`` в ``BETWEEN`` на технический маркер."""
-
-        return f"BETWEEN {match.group(1)} __BETWEEN_AND__ {match.group(2)}"
-
-    protected = re.sub(
-        r"(?is)BETWEEN\s+('[^']*'|\"[^\"]*\"|\S+)\s+AND\s+('[^']*'|\"[^\"]*\"|\S+)",
-        protect_between,
-        where_text,
-    )
-    return [part.replace("__BETWEEN_AND__", "AND").strip() for part in re.split(r"(?i)\s+AND\s+", protected) if part.strip()]
+    result = dict(item)
+    result["column"] = _normalize_column_name(result.get("column"))
+    return result
 
 
-def _parse_where_condition(condition: str) -> dict[str, Any]:
-    """Разбирает одно условие ``WHERE``.
+def _has_required_period(filters: list[Any]) -> bool:
+    """Проверяет наличие фильтра временного интервала.
 
     Args:
-        condition: SQL-подобное условие.
+        filters: Фильтры, которые вернул LLM-разбор.
 
     Returns:
-        Структурированный фильтр для внутренней выборки.
-
-    Raises:
-        ValueError: Условие использует неподдерживаемый синтаксис.
-    """
-
-    between_match = re.fullmatch(
-        r"\s*([A-Za-z_][\w]*)\s+BETWEEN\s+(.+?)\s+AND\s+(.+?)\s*",
-        condition,
-        flags=re.I,
-    )
-    if between_match:
-        return {
-            "column": between_match.group(1),
-            "operator": "between",
-            "values": [_strip_quotes(between_match.group(2)), _strip_quotes(between_match.group(3))],
-        }
-
-    in_match = re.fullmatch(r"\s*([A-Za-z_][\w]*)\s+IN\s*\((.+)\)\s*", condition, flags=re.I)
-    if in_match:
-        return {"column": in_match.group(1), "operator": "in", "values": [_strip_quotes(item) for item in _split_csv(in_match.group(2))]}
-
-    contains_match = re.fullmatch(r"\s*([A-Za-z_][\w]*)\s+CONTAINS\s+(.+?)\s*", condition, flags=re.I)
-    if contains_match:
-        return {"column": contains_match.group(1), "operator": "contains", "value": _strip_quotes(contains_match.group(2))}
-
-    compare_match = re.fullmatch(r"\s*([A-Za-z_][\w]*)\s*(=|!=|<>|>=|<=|>|<)\s*(.+?)\s*", condition)
-    if compare_match:
-        operator = {"=": "eq", "!=": "ne", "<>": "ne", ">": "gt", ">=": "gte", "<": "lt", "<=": "lte"}[
-            compare_match.group(2)
-        ]
-        return {"column": compare_match.group(1), "operator": operator, "value": _strip_quotes(compare_match.group(3))}
-
-    raise ValueError(f"неподдерживаемое условие WHERE: {condition!r}.")
-
-
-def _find_between_filter(filters: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Ищет фильтр периода среди уже разобранных условий ``WHERE``.
-
-    Args:
-        filters: Список фильтров из ``WHERE``.
-
-    Returns:
-        Первый фильтр ``between`` или ``None``.
+        ``True``, если найден хотя бы один ``between`` с двумя границами.
     """
 
     for item in filters:
-        if item.get("operator") == "between" and len(item.get("values", [])) == 2:
-            return item
-    return None
+        operator = str(_get_field(item, "operator") or "").lower()
+        values = _get_field(item, "values") or []
+        value = _get_field(item, "value")
+        if operator == "between" and len(values) == 2:
+            return True
+    return False
 
 
-def _parse_order_by_clause(order_text: str) -> list[dict[str, str]]:
-    """Разбирает ``ORDER BY`` в список правил сортировки.
-
-    Args:
-        order_text: Текст после ``ORDER BY``.
-
-    Returns:
-        Список правил сортировки.
-    """
-
-    result: list[dict[str, str]] = []
-    for item in _split_csv(order_text):
-        parts = item.split()
-        if parts:
-            result.append({"column": parts[0], "direction": parts[1].lower() if len(parts) > 1 else "asc"})
-    return result
-
-
-def _parse_derive_clause(derive_text: str) -> list[dict[str, str]]:
-    """Разбирает ``DERIVE`` в список вычисляемых колонок.
+def _dump_model(value: Any) -> dict[str, Any]:
+    """Преобразует pydantic-модель или dict в обычный словарь.
 
     Args:
-        derive_text: Текст после ``DERIVE``.
+        value: Pydantic-модель или словарь.
 
     Returns:
-        Список вычисляемых колонок.
+        Словарь с полями модели.
     """
 
-    result: list[dict[str, str]] = []
-    for item in _split_csv(derive_text):
-        parsed = _parse_derived_item(item)
-        result.append({"name": parsed[0], "source_column": parsed[1], "operation": parsed[2]})
-    return result
-
-
-def _parse_limit(limit_text: str) -> int | None:
-    """Разбирает ``LIMIT``.
-
-    Args:
-        limit_text: Текст после ``LIMIT``.
-
-    Returns:
-        Целочисленный лимит или ``None``.
-    """
-
-    if not limit_text:
-        return None
-    match = re.match(r"\s*(\d+)\b", limit_text)
-    return int(match.group(1)) if match else None
-
-
-def _split_csv(text: str) -> list[str]:
-    """Разделяет строку по запятым вне кавычек и скобок.
-
-    Args:
-        text: Строка со списком значений.
-
-    Returns:
-        Список очищенных элементов.
-    """
-
-    result: list[str] = []
-    current: list[str] = []
-    quote = ""
-    depth = 0
-    for char in text:
-        if char in {"'", '"'} and not quote:
-            quote = char
-        elif char == quote:
-            quote = ""
-        elif not quote and char == "(":
-            depth += 1
-        elif not quote and char == ")" and depth:
-            depth -= 1
-        if char == "," and not quote and depth == 0:
-            item = "".join(current).strip()
-            if item:
-                result.append(item)
-            current = []
-        else:
-            current.append(char)
-    item = "".join(current).strip()
-    if item:
-        result.append(item)
-    return result
-
-
-def _strip_quotes(value: str) -> str:
-    """Удаляет внешние кавычки у значения фильтра.
-
-    Args:
-        value: Значение из SQL-подобного запроса.
-
-    Returns:
-        Очищенное строковое значение.
-    """
-
-    text = value.strip()
-    if (text.startswith("'") and text.endswith("'")) or (text.startswith('"') and text.endswith('"')):
-        return text[1:-1]
-    return text
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    return dict(value)
 
 
 def _read_table(
@@ -493,7 +647,6 @@ def _read_table(
     aggregations: Any,
     order_by: Any,
     max_rows: int | None,
-    include_schema: bool,
 ) -> Any:
     """Выполняет Spark-запрос и возвращает pandas DataFrame.
 
@@ -507,7 +660,6 @@ def _read_table(
         aggregations: Агрегаты списком объектов.
         order_by: Сортировка списком объектов.
         max_rows: Максимальное число строк результата.
-        include_schema: Нужно ли приложить схему результата.
 
     Returns:
         pandas DataFrame с metadata в ``attrs`` или текст ошибки.
@@ -553,13 +705,6 @@ def _read_table(
         frame.attrs["spark_source_file"] = table_alias
         frame.attrs["spark_total_rows"] = int(total_rows)
         frame.attrs["spark_matched_rows"] = int(matched_rows)
-        if include_schema:
-            frame.attrs["spark_schema"] = {
-                "table_name": table_alias,
-                "resolved_table_name": resolved_table_name,
-                "columns_count": len(result.columns),
-                "columns": [{"name": name, "type": str(dtype)} for name, dtype in result.dtypes],
-            }
         return frame
     except ValueError as exc:
         return f"Ошибка load_data: {exc}"
@@ -702,6 +847,14 @@ def _build_filter_expression(item: Any) -> Any:
         return spark_column.isNotNull()
     if operator == "contains":
         return spark_column.cast("string").contains(raw_value)
+    if operator == "contains_any":
+        expression = None
+        for value in _parse_filter_values(raw_value):
+            item_expression = spark_column.cast("string").contains(value)
+            expression = item_expression if expression is None else expression | item_expression
+        if expression is None:
+            raise ValueError("Для оператора contains_any нужно хотя бы одно значение.")
+        return expression
     if operator == "in":
         return spark_column.isin([_parse_scalar(value) for value in _parse_filter_values(raw_value)])
     if operator == "between":
@@ -738,8 +891,14 @@ def _apply_aggregations(*, table: Any, group_columns: list[str], aggregations: l
         Spark DataFrame с результатом агрегаций.
     """
 
+    aggregation_columns = [
+        column
+        for item in aggregations
+        for function, column, _alias in [_parse_aggregation_item(item)]
+        if not (function == "count" and column == "*")
+    ]
     missing = _validate_columns(
-        columns=[*group_columns, *[_parse_aggregation_item(item)[1] for item in aggregations]],
+        columns=[*group_columns, *aggregation_columns],
         available_columns=table.columns,
         allow_empty=True,
     )
@@ -766,7 +925,7 @@ def _build_aggregation_expression(item: Any) -> Any:
 
     function, column, alias = _parse_aggregation_item(item)
     if function == "count":
-        expression = functions.count(functions.col(column))
+        expression = functions.count("*") if column == "*" else functions.count(functions.col(column))
     elif function == "count_distinct":
         expression = functions.countDistinct(functions.col(column))
     elif function == "min":
@@ -853,15 +1012,13 @@ def _parse_filter_item(item: Any) -> tuple[str, str, str]:
         operator = str(_get_field(item, "operator") or "eq").strip().lower()
         values = _get_field(item, "values") or []
         value = _get_field(item, "value")
-        second_value = _get_field(item, "second_value")
         if operator not in _FILTER_OPERATORS:
             raise ValueError(f"Неподдерживаемый оператор фильтра: {operator}")
-        if operator == "in":
+        if operator in {"in", "contains_any"}:
             raw_values = values if values else ([] if value is None else [value])
             raw_value = ",".join(str(part) for part in raw_values)
         elif operator == "between":
-            raw_values = values if values else [part for part in (value, second_value) if part is not None]
-            raw_value = ",".join(str(part) for part in raw_values)
+            raw_value = ",".join(str(part) for part in values)
         else:
             raw_value = "" if value is None else str(value)
         if not column:
@@ -1112,5 +1269,6 @@ __all__ = [
     "ReadTableInput",
     "TABLE_ALIASES",
     "build_spark_data_tools",
-    "_parse_sql_like_query",
+    "_extract_query_args_with_llm",
+    "_parsed_query_to_read_args",
 ]
